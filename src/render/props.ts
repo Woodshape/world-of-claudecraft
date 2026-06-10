@@ -1,18 +1,26 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { terrainHeight } from '../sim/world';
-import { PROPS } from '../sim/data';
+import { PROPS, WORLD_MIN_Z } from '../sim/data';
 import { roofTexture, wallTexture, stoneTexture } from './textures';
 
 // Static world props: buildings, tents, campfires, mines, ruins, docks, fences.
 // Placement comes from the per-zone content modules (merged into PROPS by
 // sim/data.ts) — the collider grid uses the same defs, so rendering and
 // collision agree.
+//
+// After building, every static mesh is baked into world space and merged per
+// (material, z-band) — hundreds of little box/cylinder draws collapse into a
+// few dozen, and the z-bands keep off-screen settlements frustum-cullable.
+// Animated flames and the fire PointLights stay live objects.
 
 export interface PropsResult {
   group: THREE.Group;
   flames: THREE.Mesh[]; // animated campfire flames
   fireLights: THREE.PointLight[];
 }
+
+const MERGE_BAND_DEPTH = 180;
 
 export function buildProps(seed: number): PropsResult {
   const group = new THREE.Group();
@@ -28,6 +36,13 @@ export function buildProps(seed: number): PropsResult {
   const woodMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2b });
   const woodDarkMat = new THREE.MeshLambertMaterial({ color: 0x4a3320 });
   const canvasMat = new THREE.MeshLambertMaterial({ color: 0xc9b48a, side: THREE.DoubleSide });
+  const windowMat = new THREE.MeshLambertMaterial({ color: 0x35506b, emissive: 0x1a2c40, emissiveIntensity: 0.7 });
+  const awningMat = new THREE.MeshLambertMaterial({ color: 0x1e8449 });
+  const breadMat = new THREE.MeshLambertMaterial({ color: 0xc8954a });
+  const jugMat = new THREE.MeshLambertMaterial({ color: 0x7a9cc6 });
+  const holeMat = new THREE.MeshBasicMaterial({ color: 0x050505 });
+  const oreMat = new THREE.MeshLambertMaterial({ color: 0xb87333 });
+  const mudMat = new THREE.MeshLambertMaterial({ color: 0x6e7f4e, flatShading: true });
 
   const ground = (x: number, z: number) => terrainHeight(x, z, seed);
 
@@ -59,9 +74,7 @@ export function buildProps(seed: number): PropsResult {
     g.add(door);
     // windows
     for (const sx of [-w / 3, w / 3]) {
-      const win = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.1), new THREE.MeshLambertMaterial({
-        color: 0x35506b, emissive: 0x1a2c40, emissiveIntensity: 0.7,
-      }));
+      const win = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.1), windowMat);
       win.position.set(sx, 1.9, d / 2 + 0.06);
       g.add(win);
     }
@@ -114,16 +127,16 @@ export function buildProps(seed: number): PropsResult {
     const counter = new THREE.Mesh(new THREE.BoxGeometry(3, 0.9, 1.4), woodMat);
     counter.position.y = 0.45;
     g.add(counter);
-    const awning = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.1, 2.2), new THREE.MeshLambertMaterial({ color: 0x1e8449 }));
+    const awning = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.1, 2.2), awningMat);
     awning.position.y = 2.45;
     awning.rotation.x = 0.12;
     g.add(awning);
     // goods
-    const bread = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 4), new THREE.MeshLambertMaterial({ color: 0xc8954a }));
+    const bread = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 4), breadMat);
     bread.scale.set(1.4, 0.8, 0.9);
     bread.position.set(-0.6, 1.0, 0);
     g.add(bread);
-    const jug = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 0.4, 8), new THREE.MeshLambertMaterial({ color: 0x7a9cc6 }));
+    const jug = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 0.4, 8), jugMat);
     jug.position.set(0.5, 1.1, 0.2);
     g.add(jug);
     g.position.set(sx0, ground(sx0, sz0), sz0);
@@ -261,7 +274,7 @@ export function buildProps(seed: number): PropsResult {
     lintel.position.y = 3.3;
     g.add(lintel);
     // dark hole
-    const hole = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 3), new THREE.MeshBasicMaterial({ color: 0x050505 }));
+    const hole = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 3), holeMat);
     hole.position.set(0, 1.5, -0.2);
     g.add(hole);
     // mound above
@@ -273,7 +286,7 @@ export function buildProps(seed: number): PropsResult {
     const cart = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.7, 0.9), woodDarkMat);
     cart.position.set(2.8, 0.55, 1.6);
     g.add(cart);
-    const ore = new THREE.Mesh(new THREE.DodecahedronGeometry(0.5, 0), new THREE.MeshLambertMaterial({ color: 0xb87333 }));
+    const ore = new THREE.Mesh(new THREE.DodecahedronGeometry(0.5, 0), oreMat);
     ore.position.set(2.8, 1.05, 1.6);
     g.add(ore);
     g.position.set(x, ground(x, z), z);
@@ -342,11 +355,51 @@ export function buildProps(seed: number): PropsResult {
 
   // ---- murloc mud huts ----
   for (const [x, z] of PROPS.mudHuts) {
-    const hut = new THREE.Mesh(new THREE.SphereGeometry(1.2, 7, 5, 0, Math.PI * 2, 0, Math.PI / 2),
-      new THREE.MeshLambertMaterial({ color: 0x6e7f4e, flatShading: true }));
+    const hut = new THREE.Mesh(new THREE.SphereGeometry(1.2, 7, 5, 0, Math.PI * 2, 0, Math.PI / 2), mudMat);
     hut.position.set(x, ground(x, z), z);
     group.add(shadowed(hut));
   }
 
+  mergeStaticMeshes(group, new Set(flames));
   return { group, flames, fireLights };
+}
+
+// Bake every static prop mesh into world space and merge per
+// (material, castShadow, z-band). Flames (animated) survive untouched, as do
+// the PointLights (not meshes). The merged meshes replace the originals on
+// the same group; emptied sub-groups are left in place (they carry lights).
+function mergeStaticMeshes(group: THREE.Group, keep: Set<THREE.Object3D>): void {
+  group.updateMatrixWorld(true);
+  interface Bucket { material: THREE.Material; castShadow: boolean; geoms: THREE.BufferGeometry[] }
+  const buckets = new Map<string, Bucket>();
+  const merged: THREE.Mesh[] = [];
+  group.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh || keep.has(mesh)) return;
+    const material = mesh.material as THREE.Material;
+    const worldZ = mesh.matrixWorld.elements[14];
+    const band = Math.floor((worldZ - WORLD_MIN_Z) / MERGE_BAND_DEPTH);
+    const key = `${material.uuid}:${mesh.castShadow ? 1 : 0}:${band}`;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { material, castShadow: mesh.castShadow, geoms: [] };
+      buckets.set(key, bucket);
+    }
+    bucket.geoms.push(mesh.geometry.clone().applyMatrix4(mesh.matrixWorld));
+    merged.push(mesh);
+  });
+  for (const mesh of merged) {
+    mesh.removeFromParent();
+    mesh.geometry.dispose(); // never uploaded — merge runs before first render
+  }
+  for (const bucket of buckets.values()) {
+    const geo = mergeGeometries(bucket.geoms, false);
+    if (!geo) continue;
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, bucket.material);
+    mesh.castShadow = bucket.castShadow;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  }
 }

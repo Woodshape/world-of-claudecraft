@@ -1,24 +1,27 @@
 import * as THREE from 'three';
 import { Entity, SimEvent } from '../sim/types';
 import type { IWorld } from '../world_api';
-import { terrainHeight, groundHeight, generateDecorations, roadDistance, WATER_LEVEL } from '../sim/world';
+import { terrainHeight, groundHeight, generateDecorations, roadDistance, WATER_LEVEL, zoneBiomeAt } from '../sim/world';
 import {
-  WORLD_SIZE, MOBS, ABILITIES, DUNGEON_X_THRESHOLD, DUNGEON_LIST,
-  instanceOrigin, INSTANCE_SLOT_COUNT, ZONES, ZoneDef,
+  MOBS, ABILITIES, DUNGEON_X_THRESHOLD, DUNGEON_LIST,
+  instanceOrigin, INSTANCE_SLOT_COUNT, ZONES,
   WORLD_MAX_X, WORLD_MAX_Z, WORLD_MIN_Z,
 } from '../sim/data';
 import type { BiomeId } from '../sim/types';
 import { buildBear, buildRigFor, buildSheep, Rig } from './models';
 import { buildProps } from './props';
-import {
-  barkTexture, cloudTexture, foliageTexture, grassTuftTexture, groundDetailTexture,
-  skyTexture, sparkleTexture, waterNormalish,
-} from './textures';
+import { barkTexture, foliageTexture, grassTuftTexture, sparkleTexture } from './textures';
 import { Vfx } from './vfx';
 import { GFX, initGfxTier, sharedUniforms, urlForcedTier } from './gfx';
 import { buildComposer, PostPipeline } from './post';
+import { buildTerrain } from './terrain';
+import { buildWater, WaterView } from './water';
+import { buildClouds, buildSky, SkyView } from './sky';
 
 const NAMEPLATE_RANGE = 55;
+// Entities further than this from the player are hidden entirely: their rigs
+// are a dozen draw calls each and read as sub-pixel specks long before this.
+const ENTITY_DRAW_RANGE = 110;
 // lighting rig (high/ultra) — IBL supplies ambient, sun carries the key
 const HEMI_INTENSITY = 0.45;
 const SUN_INTENSITY = 2.8;
@@ -63,11 +66,12 @@ export class Renderer {
   private sun: THREE.DirectionalLight;
   private hemi!: THREE.HemisphereLight;
   private sky!: THREE.Mesh;
+  private skyView!: SkyView;
   private sunSprites: THREE.Sprite[] = [];
   private sunDir = new THREE.Vector3();
   private clouds: THREE.Sprite[] = [];
-  private water: THREE.Mesh;
-  private waterTex: THREE.Texture;
+  private waterView: WaterView;
+  private fogScratch = new THREE.Color();
   private flames: THREE.Mesh[];
   private fireLights: THREE.PointLight[];
   private time = 0;
@@ -93,12 +97,11 @@ export class Renderer {
 
     this.scene.fog = new THREE.Fog(0xa6c6e0, 130, 470);
 
-    // sky dome — follows the camera so the world strip never outruns it
-    this.sky = new THREE.Mesh(
-      new THREE.SphereGeometry(560, 24, 16),
-      new THREE.MeshBasicMaterial({ map: skyTexture(), side: THREE.BackSide, fog: false, depthWrite: false }),
-    );
-    this.sky.renderOrder = -10;
+    // sky dome — follows the camera so the world strip never outruns it.
+    // High tier: shader gradient + sun glow with biome-aware horizon tints;
+    // low keeps the legacy canvas-gradient dome.
+    this.skyView = buildSky(LOW_GFX, new THREE.Vector3(90, 140, 50));
+    this.sky = this.skyView.dome;
     this.scene.add(this.sky);
 
     // IBL: prefilter the sky dome itself so PBR materials get sky-matched
@@ -199,35 +202,16 @@ export class Renderer {
       }
     }
 
-    // clouds, spread over the whole zone strip
-    const cloudTex = cloudTexture();
-    const cloudSpan = (WORLD_MAX_Z - WORLD_MIN_Z) + 240;
-    for (let i = 0; i < (LOW_GFX ? 14 : 30); i++) {
-      const mat = new THREE.SpriteMaterial({ map: cloudTex, transparent: true, opacity: 0.85, fog: false, depthWrite: false });
-      const cl = new THREE.Sprite(mat);
-      const sc = 60 + Math.random() * 90;
-      cl.scale.set(sc, sc * 0.45, 1);
-      cl.position.set(
-        (Math.random() - 0.5) * 600,
-        95 + Math.random() * 55,
-        WORLD_MIN_Z - 120 + Math.random() * cloudSpan,
-      );
+    // clouds, spread over the whole zone strip (3 sprite variants + a faint
+    // high cirrus layer on the full pipeline)
+    for (const cl of buildClouds(LOW_GFX).sprites) {
       this.clouds.push(cl);
       this.scene.add(cl);
     }
 
-    this.buildTerrain();
-    // water
-    this.waterTex = waterNormalish();
-    this.waterTex.repeat.set(30, 30);
-    const waterMat = new THREE.MeshPhongMaterial({
-      color: 0x2a6a96, transparent: true, opacity: 0.8, shininess: 140,
-      specular: 0xd8ecff, map: this.waterTex,
-    });
-    const worldDepth = WORLD_MAX_Z - WORLD_MIN_Z;
-    this.water = new THREE.Mesh(new THREE.PlaneGeometry(WORLD_SIZE, worldDepth).rotateX(-Math.PI / 2), waterMat);
-    this.water.position.set(0, WATER_LEVEL, (WORLD_MIN_Z + WORLD_MAX_Z) / 2);
-    this.scene.add(this.water);
+    this.scene.add(buildTerrain(this.sim.cfg.seed));
+    this.waterView = buildWater(this.sim.cfg.seed);
+    for (const mesh of this.waterView.meshes) this.scene.add(mesh);
 
     this.buildDecorations();
     this.buildGrass();
@@ -303,112 +287,6 @@ export class Renderer {
   // -------------------------------------------------------------------------
   // World building
   // -------------------------------------------------------------------------
-
-  private buildTerrain(): void {
-    const detail = groundDetailTexture();
-    detail.repeat.set(160, 160);
-    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, map: detail });
-    for (const zone of ZONES) this.buildTerrainChunk(zone, mat);
-  }
-
-  // Ground colors per biome; boundaries blend across the same window as the
-  // heightfield's shape blend.
-  private static BIOME_PALETTE: Record<BiomeId, { grass: number; grassDark: number; grassYellow: number; dirt: number; sand: number }> = {
-    vale: { grass: 0x55913f, grassDark: 0x3f7230, grassYellow: 0x7a9a3d, dirt: 0x8a6f47, sand: 0xc2b283 },
-    marsh: { grass: 0x596d36, grassDark: 0x41522b, grassYellow: 0x71764a, dirt: 0x6e5a3e, sand: 0x8f7f5c },
-    peaks: { grass: 0x687a55, grassDark: 0x4d5c45, grassYellow: 0x8d9168, dirt: 0x7d6a50, sand: 0xb0a486 },
-  };
-
-  private buildTerrainChunk(zone: ZoneDef, mat: THREE.Material): void {
-    // per-zone chunks: keep the whole strip near the old single-zone triangle
-    // budget so software-GL test runners stay usable
-    const segX = this.lowGfx ? 140 : 256;
-    const depth = zone.zMax - zone.zMin;
-    const segZ = Math.max(8, Math.round(segX * (depth / WORLD_SIZE)));
-    const geo = new THREE.PlaneGeometry(WORLD_SIZE, depth, segX, segZ);
-    geo.rotateX(-Math.PI / 2);
-    geo.translate(0, 0, (zone.zMin + zone.zMax) / 2);
-    const pos = geo.attributes.position as THREE.BufferAttribute;
-    const colors = new Float32Array(pos.count * 3);
-    const dirtDark = new THREE.Color(0x73592f);
-    const rock = new THREE.Color(0x7a7a72);
-    const hazyPeak = new THREE.Color(0xa8bdd4); // world-rim mountains, atmospheric
-    const snowCap = new THREE.Color(0xedf3fa);
-    const c = new THREE.Color();
-    const grass = new THREE.Color(), grassDark = new THREE.Color(), grassYellow = new THREE.Color();
-    const dirt = new THREE.Color(), sand = new THREE.Color();
-    const pals = ZONES.map((zn) => {
-      const p = Renderer.BIOME_PALETTE[zn.biome];
-      return {
-        grass: new THREE.Color(p.grass), grassDark: new THREE.Color(p.grassDark),
-        grassYellow: new THREE.Color(p.grassYellow), dirt: new THREE.Color(p.dirt), sand: new THREE.Color(p.sand),
-      };
-    });
-    const paletteAt = (z: number) => {
-      grass.copy(pals[0].grass); grassDark.copy(pals[0].grassDark);
-      grassYellow.copy(pals[0].grassYellow); dirt.copy(pals[0].dirt); sand.copy(pals[0].sand);
-      for (let i = 0; i + 1 < ZONES.length; i++) {
-        const b = ZONES[i].zMax;
-        const t = Math.max(0, Math.min(1, (z - (b - 30)) / 65));
-        const tt = t * t * (3 - 2 * t);
-        if (tt <= 0) break;
-        grass.lerp(pals[i + 1].grass, tt);
-        grassDark.lerp(pals[i + 1].grassDark, tt);
-        grassYellow.lerp(pals[i + 1].grassYellow, tt);
-        dirt.lerp(pals[i + 1].dirt, tt);
-        sand.lerp(pals[i + 1].sand, tt);
-      }
-    };
-    const seed = this.sim.cfg.seed;
-    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i), z = pos.getZ(i);
-      const h = terrainHeight(x, z, seed);
-      pos.setY(i, h);
-      const eps = 1.5;
-      const hx = terrainHeight(x + eps, z, seed) - terrainHeight(x - eps, z, seed);
-      const hz = terrainHeight(x, z + eps, seed) - terrainHeight(x, z - eps, seed);
-      const slope = Math.sqrt(hx * hx + hz * hz) / (2 * eps);
-      paletteAt(z);
-      // base grass with patchy variation
-      const v = (Math.sin(x * 0.21) * Math.cos(z * 0.17) + 1) / 2;
-      c.copy(grass).lerp(grassDark, v);
-      const v2 = (Math.sin(x * 0.043 + 5) * Math.cos(z * 0.05 + 2) + 1) / 2;
-      c.lerp(grassYellow, v2 * 0.35);
-      if (h < WATER_LEVEL + 1.6) c.copy(sand);
-      // packed dirt at each hub settlement
-      for (const zn of ZONES) {
-        const dHub = Math.hypot(x - zn.hub.x, z - zn.hub.z);
-        if (dHub < 14) { c.lerp(dirtDark, 0.7); break; }
-      }
-      const rd = roadDistance(x, z);
-      if (rd < 2.0) c.lerp(dirt, 0.85);
-      else if (rd < 3.4) c.lerp(dirt, 0.85 * (1 - (rd - 2.0) / 1.4));
-      if (slope > 0.55) c.lerp(rock, Math.min(1, (slope - 0.55) * 2));
-      // high ground (ridges, peaks) goes rocky then snowy
-      if (h > 22) {
-        c.lerp(rock, clamp01((h - 22) / 10) * 0.7);
-        c.lerp(snowCap, clamp01((h - 34) / 14) * 0.85);
-      }
-      // the rim wall reads as distant sunlit peaks, not a black cliff
-      const edge = Math.max(
-        Math.abs(x) - (WORLD_MAX_X - 32),
-        WORLD_MIN_Z + 32 - z,
-        z - (WORLD_MAX_Z - 32),
-      );
-      const rim = clamp01(edge / 26);
-      if (rim > 0) {
-        c.lerp(hazyPeak, rim * 0.9);
-        c.lerp(snowCap, clamp01((h - 26) / 16) * rim * 0.8);
-      }
-      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.receiveShadow = true;
-    this.scene.add(mesh);
-  }
 
   private buildDecorations(): void {
     const decos = generateDecorations(this.sim.cfg.seed);
@@ -789,7 +667,20 @@ export class Renderer {
     this.scene.add(g);
   }
 
-  private updateAmbience(px: number, camY: number): void {
+  // Outdoor fog presets per biome (high tier eases between them as the
+  // player crosses zone bands; low keeps the legacy vale fog everywhere).
+  private static BIOME_FOG: Record<BiomeId, { color: number; near: number; far: number }> = {
+    vale: { color: 0xa6c6e0, near: 130, far: 470 },
+    marsh: { color: 0xa3b294, near: 80, far: 330 },
+    peaks: { color: 0xbdd3ec, near: 160, far: 560 },
+  };
+
+  private outdoorFogPreset(): { color: number; near: number; far: number } {
+    if (this.lowGfx) return Renderer.BIOME_FOG.vale;
+    return Renderer.BIOME_FOG[zoneBiomeAt(this.sim.player.pos.z)];
+  }
+
+  private updateAmbience(px: number, camY: number, dt: number): void {
     const inside = px > DUNGEON_X_THRESHOLD;
     if (inside) {
       // build the interior copy the player is standing in
@@ -806,29 +697,40 @@ export class Renderer {
       }
     }
     const desired = inside ? 'dungeon' : camY < WATER_LEVEL - 0.05 ? 'underwater' : 'outdoor';
-    if (desired === this.fogState) return;
-    this.fogState = desired;
     const fog = this.scene.fog as THREE.Fog;
-    if (desired === 'dungeon') {
-      fog.color.setHex(0x05060a);
-      fog.near = 18;
-      fog.far = 90;
-    } else if (desired === 'underwater') {
-      fog.color.setHex(0x17506e);
-      fog.near = 2;
-      fog.far = 48;
-    } else {
-      fog.color.setHex(0xa6c6e0);
-      fog.near = 130;
-      fog.far = 470;
+    if (desired !== this.fogState) {
+      this.fogState = desired;
+      if (desired === 'dungeon') {
+        fog.color.setHex(0x05060a);
+        fog.near = 18;
+        fog.far = 90;
+      } else if (desired === 'underwater') {
+        fog.color.setHex(0x17506e);
+        fog.near = 2;
+        fog.far = 48;
+      } else {
+        const preset = this.outdoorFogPreset();
+        fog.color.setHex(preset.color);
+        fog.near = preset.near;
+        fog.far = preset.far;
+      }
+      // interiors must not leak daylight: drop sun + sky ambient + IBL
+      // underground so the torch point lights own the scene; restore outside
+      if (!this.lowGfx) {
+        const underground = desired === 'dungeon';
+        this.sun.intensity = underground ? DUNGEON_SUN_INTENSITY : SUN_INTENSITY;
+        this.hemi.intensity = underground ? DUNGEON_HEMI_INTENSITY : HEMI_INTENSITY;
+        this.scene.environmentIntensity = underground ? DUNGEON_ENV_INTENSITY : ENV_INTENSITY;
+      }
+      return;
     }
-    // interiors must not leak daylight: drop sun + sky ambient + IBL
-    // underground so the torch point lights own the scene; restore outside
-    if (!this.lowGfx) {
-      const underground = desired === 'dungeon';
-      this.sun.intensity = underground ? DUNGEON_SUN_INTENSITY : SUN_INTENSITY;
-      this.hemi.intensity = underground ? DUNGEON_HEMI_INTENSITY : HEMI_INTENSITY;
-      this.scene.environmentIntensity = underground ? DUNGEON_ENV_INTENSITY : ENV_INTENSITY;
+    // outdoors: ease fog toward the current biome's preset (~2s)
+    if (desired === 'outdoor' && !this.lowGfx) {
+      const preset = this.outdoorFogPreset();
+      const k = 1 - Math.exp(-dt * 1.5);
+      fog.color.lerp(this.fogScratch.setHex(preset.color), k);
+      fog.near += (preset.near - fog.near) * k;
+      fog.far += (preset.far - fog.far) * k;
     }
   }
 
@@ -860,6 +762,15 @@ export class Renderer {
     for (const e of sim.entities.values()) {
       const v = this.views.get(e.id);
       if (!v) continue;
+      // distance cull: far rigs are invisible specks but cost real draw calls
+      if (e.id !== p.id) {
+        const cdx = e.pos.x - p.pos.x, cdz = e.pos.z - p.pos.z;
+        if (cdx * cdx + cdz * cdz > ENTITY_DRAW_RANGE * ENTITY_DRAW_RANGE) {
+          v.group.visible = false;
+          continue;
+        }
+        v.group.visible = true; // the object branch below may re-hide loot
+      }
       const x = e.prevPos.x + (e.pos.x - e.prevPos.x) * alpha;
       const y = e.prevPos.y + (e.pos.y - e.prevPos.y) * alpha;
       const z = e.prevPos.z + (e.pos.z - e.prevPos.z) * alpha;
@@ -1015,20 +926,19 @@ export class Renderer {
       light.intensity = base + Math.sin(this.time * 11 + i * 1.7) * 2.5 * (base / 11);
     }
 
-    // clouds drift
+    // clouds drift (the high cirrus layer crawls slower)
     for (const cl of this.clouds) {
-      cl.position.x += dt * 1.6;
+      cl.position.x += dt * ((cl.userData.drift as number | undefined) ?? 1.6);
       if (cl.position.x > 320) cl.position.x = -320;
     }
 
-    // water shimmer
-    this.waterTex.offset.x = this.time * 0.008;
-    this.waterTex.offset.y = this.time * 0.011;
+    // water shimmer (low-tier texture scroll; shader water rides uTime)
+    this.waterView.update(this.time);
 
     this.vfx.update(dt);
 
     this.updateCamera(alpha);
-    this.updateAmbience(p.pos.x, this.camera.position.y);
+    this.updateAmbience(p.pos.x, this.camera.position.y, dt);
     // shadow frustum follows the player
     const pv = this.views.get(p.id);
     if (pv) {
@@ -1039,6 +949,7 @@ export class Renderer {
     // sky dome + sun disc ride along with the camera
     this.sky.position.set(this.camera.position.x, 0, this.camera.position.z);
     this.sky.visible = this.fogState === 'outdoor';
+    if (this.sky.visible) this.skyView.setCameraZ(this.camera.position.z, dt);
     for (const sp of this.sunSprites) {
       sp.position.copy(this.camera.position).addScaledVector(this.sunDir, 760);
       sp.visible = this.fogState === 'outdoor';

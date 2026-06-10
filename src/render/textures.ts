@@ -157,12 +157,12 @@ export function waterNormalish(): THREE.CanvasTexture {
   return tex;
 }
 
-// Soft round cloud sprite
-export function cloudTexture(): THREE.CanvasTexture {
+// Soft round cloud sprite. Vary puff count/spread for distinct cloud shapes.
+export function cloudTexture(puffs = 14, spread = 0.5): THREE.CanvasTexture {
   return makeCanvas(256, (ctx, s) => {
     ctx.clearRect(0, 0, s, s);
-    for (let i = 0; i < 14; i++) {
-      const x = s * 0.25 + rnd() * s * 0.5;
+    for (let i = 0; i < puffs; i++) {
+      const x = s * (0.5 - spread / 2) + rnd() * s * spread;
       const y = s * 0.35 + rnd() * s * 0.3;
       const r = s * 0.10 + rnd() * s * 0.14;
       const g = ctx.createRadialGradient(x, y, 0, x, y, r);
@@ -174,6 +174,30 @@ export function cloudTexture(): THREE.CanvasTexture {
       ctx.fill();
     }
   });
+}
+
+// Large-scale smooth value noise: breaks up terrain texture tiling at
+// distance (sampled at ~80u period in the splat shader).
+export function macroNoiseTexture(): THREE.CanvasTexture {
+  const tex = makeCanvas(256, (ctx, s) => {
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, s, s);
+    for (let i = 0; i < 160; i++) {
+      const x = rnd() * s, y = rnd() * s, r = 18 + rnd() * 46;
+      const v = 40 + rnd() * 175;
+      drawWrapped(ctx, s, (ox, oy) => {
+        const g = ctx.createRadialGradient(x + ox, y + oy, 0, x + ox, y + oy, r);
+        g.addColorStop(0, `rgba(${v},${v},${v},0.30)`);
+        g.addColorStop(1, `rgba(${v},${v},${v},0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x + ox, y + oy, r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+  });
+  tex.colorSpace = THREE.NoColorSpace;
+  return tex;
 }
 
 // Vertical sky gradient for the dome
@@ -397,23 +421,23 @@ export function groundSplatMaps(): GroundSplat {
     ctx.fillRect(0, 0, s, s);
     for (let i = 0; i < 900; i++) {
       const x = rnd() * s, y = rnd() * s, r = 4 + rnd() * 9;
-      const v = 110 + rnd() * 60;
+      const v = 90 + rnd() * 105;
       drawWrapped(ctx, s, (ox, oy) => {
-        ctx.fillStyle = `rgba(${v - 18},${v},${v - 40},0.18)`;
+        ctx.fillStyle = `rgba(${v - 18},${v},${v - 40},0.30)`;
         ctx.beginPath();
         ctx.ellipse(x + ox, y + oy, r, r * 0.7, rnd() * Math.PI, 0, Math.PI * 2);
         ctx.fill();
       });
     }
     // blades
-    for (let i = 0; i < 2200; i++) {
+    for (let i = 0; i < 3200; i++) {
       const x = rnd() * s, y = rnd() * s;
-      const v = 100 + rnd() * 80;
-      ctx.strokeStyle = `rgba(${v - 25},${v},${v - 45},0.35)`;
-      ctx.lineWidth = 1;
+      const v = 75 + rnd() * 125;
+      ctx.strokeStyle = `rgba(${v - 25},${v},${v - 45},0.55)`;
+      ctx.lineWidth = 1 + rnd() * 0.8;
       ctx.beginPath();
       ctx.moveTo(x, y);
-      ctx.lineTo(x + (rnd() - 0.5) * 3, y - 3 - rnd() * 5);
+      ctx.lineTo(x + (rnd() - 0.5) * 4, y - 3 - rnd() * 6);
       ctx.stroke();
     }
   });
@@ -582,7 +606,7 @@ export function waterNormalMaps(): [THREE.CanvasTexture, THREE.CanvasTexture] {
         });
       }
     });
-  return [heightToNormal(blobby(220, 10, 34), 2.2), heightToNormal(blobby(420, 5, 16), 2.6)];
+  return [heightToNormal(blobby(220, 10, 34), 4.6), heightToNormal(blobby(420, 5, 16), 5.2)];
 }
 
 // Alpha leaf-cluster card for tree silhouettes (crossed quads, alphaTest).
