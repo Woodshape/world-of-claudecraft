@@ -3,7 +3,8 @@ import { Sim } from '../src/sim/sim';
 import type { PlayerMeta } from '../src/sim/sim';
 import { DT, Entity, SimEvent, dist2d } from '../src/sim/types';
 import { zoneAt, DUNGEONS } from '../src/sim/data';
-import { saveCharacterState, openPlaySession, closePlaySession } from './db';
+import { saveCharacterState, openPlaySession, closePlaySession, insertChatLogs } from './db';
+import { ChatLogger } from './chat_log';
 
 const WORLD_SEED = 20061;
 const INTEREST_RADIUS = 120;
@@ -98,6 +99,7 @@ function round2(v: number): number {
 export class GameServer {
   sim: Sim;
   clients = new Map<number, ClientSession>(); // by pid
+  readonly chatLog = new ChatLogger(insertChatLogs);
   private interval: NodeJS.Timeout | null = null;
   private saveTimer = 0;
   private readonly startedAt = Date.now();
@@ -317,7 +319,20 @@ export class GameServer {
       case 'buy': if (typeof msg.npc === 'number' && typeof msg.item === 'string') sim.buyItem(msg.npc, msg.item, pid); break;
       case 'sell': if (typeof msg.item === 'string') sim.sellItem(msg.item, pid); break;
       case 'release': sim.releaseSpirit(pid); break;
-      case 'chat': if (typeof msg.text === 'string') sim.chat(msg.text, pid); break;
+      case 'chat': {
+        if (typeof msg.text !== 'string') break;
+        const sent = sim.chat(msg.text, pid);
+        if (sent) {
+          this.chatLog.log({
+            accountId: session.accountId,
+            characterId: session.characterId,
+            characterName: session.name,
+            channel: sent.channel,
+            message: sent.message,
+          });
+        }
+        break;
+      }
       // party
       case 'pinvite': if (typeof msg.id === 'number') sim.partyInvite(msg.id, pid); break;
       case 'paccept': sim.partyAccept(pid); break;
