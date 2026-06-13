@@ -100,9 +100,37 @@ describe('SpriteCharacterVisual', () => {
   it('locks on death and revives to idle', () => {
     visual.update(0.05, { ...IDLE, dead: true }, true);
     visual.playAttack();
-    visual.update(0.5, { ...IDLE, dead: true }, true);
+    const deathFrames = spriteManifestFor('player_mage')!.states.death!.frames;
+    for (let i = 0; i < deathFrames + 2; i++) {
+      visual.update(1 / 10, { ...IDLE, dead: true }, true);
+    }
     visual.update(0.05, IDLE, true);
     expect(spriteMaterial(visual).map).toBeTruthy();
+  });
+
+  it('uses independent atlas UV state per instance', () => {
+    const manifest = spriteManifestFor('mob_kobold')!;
+    seedSpriteAtlasForTest(manifest);
+    const a = new SpriteCharacterVisual('mob_kobold', 0xffffff);
+    const b = new SpriteCharacterVisual('mob_kobold', 0xffffff);
+    const scene = new THREE.Scene();
+    const groupA = new THREE.Group();
+    const groupB = new THREE.Group();
+    groupA.add(a.root);
+    groupB.add(b.root);
+    scene.add(groupA, groupB);
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
+    cam.position.set(12, 4, 0);
+    cam.lookAt(0, 1, 0);
+    a.setCamera(cam);
+    groupB.rotation.y = Math.PI;
+    b.setCamera(cam);
+    const mapA = spriteMaterial(a).map!;
+    const mapB = spriteMaterial(b).map!;
+    expect(mapA).not.toBe(mapB);
+    expect(mapA.offset.y).not.toBe(mapB.offset.y);
+    a.dispose();
+    b.dispose();
   });
 
   it('setShadow and setProxyShadow toggle blob visibility', () => {

@@ -3,9 +3,8 @@
 // sim, networking, or interaction logic.
 import * as THREE from 'three';
 import type { AnimState } from '../characters/visual';
-import { STYLE } from '../gfx';
 import {
-  directionIndex, loadSpriteAtlas, spriteAtlasReady, uvRect,
+  directionIndex, loadSpriteAtlas, spriteAtlasInstance, spriteAtlasReady, uvRect,
 } from './atlas';
 import { spriteManifestFor } from './manifest';
 import type { SpriteAnimState, SpriteManifest, SpriteStateDef } from './types';
@@ -66,15 +65,11 @@ export class SpriteCharacterVisual {
 
     const atlas = spriteAtlasReady(manifest);
     this.material = new THREE.SpriteMaterial({
-      map: atlas ?? undefined,
+      map: atlas ? spriteAtlasInstance(atlas) : undefined,
       transparent: true,
       alphaTest: 0.08,
       depthWrite: false,
     });
-    if (STYLE.spriteMode) {
-      this.material.magFilter = THREE.NearestFilter;
-      this.material.minFilter = THREE.NearestFilter;
-    }
     if (entityColor !== 0xffffff) {
       this.material.color = new THREE.Color(entityColor);
     }
@@ -104,7 +99,7 @@ export class SpriteCharacterVisual {
     this.root.add(this.clickProxy);
 
     void loadSpriteAtlas(manifest).then((tex) => {
-      this.material.map = tex;
+      this.material.map = spriteAtlasInstance(tex);
       this.material.needsUpdate = true;
       this.applyFrame();
     });
@@ -133,7 +128,7 @@ export class SpriteCharacterVisual {
       }
     }
 
-    if (animate && !this.deadLock) {
+    if (animate && (!this.deadLock || this.oneShot)) {
       const fps = this.currentState.fps;
       this.frameTime += dt;
       const frameDur = 1 / fps;
@@ -149,7 +144,7 @@ export class SpriteCharacterVisual {
       if (this.oneShotDone) {
         this.oneShot = false;
         this.oneShotDone = false;
-        this.beginState(this.baseState);
+        if (!this.deadLock) this.beginState(this.baseState);
       }
     }
 

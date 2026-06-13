@@ -25,6 +25,7 @@ function spritesStaticPlugin(): Plugin {
       });
     },
     closeBundle() {
+      if (!existsSync(SPRITES_ROOT)) return;
       cpSync(SPRITES_ROOT, join(process.cwd(), 'dist', 'sprites'), { recursive: true });
     },
   };

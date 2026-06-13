@@ -173,6 +173,11 @@ export function spriteAtlasReady(manifest: SpriteManifest): THREE.Texture | null
   return atlasCache.get(manifest.key) ?? null;
 }
 
+/** Per-visual atlas copy — repeat/offset are mutated per sprite instance. */
+export function spriteAtlasInstance(tex: THREE.Texture): THREE.Texture {
+  return tex.clone();
+}
+
 /** Test hook: install a minimal atlas texture without loading PNGs or canvas. */
 export function seedSpriteAtlasForTest(manifest: SpriteManifest): THREE.Texture {
   const { cols, rows } = atlasDimensions(manifest);
