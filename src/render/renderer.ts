@@ -936,7 +936,7 @@ export class Renderer {
     this.updateChatBubbles();
     for (const v of this.views.values()) {
       const av = this.activeVisual(v);
-      if (av && 'setCamera' in av) av.setCamera(this.camera);
+      if (av) av.setCamera?.(this.camera);
     }
     if (this.post) this.post.render();
     else this.webgl.render(this.scene, this.camera);

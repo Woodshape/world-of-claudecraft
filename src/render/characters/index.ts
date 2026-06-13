@@ -5,7 +5,7 @@
 import type { Entity } from '../../sim/types';
 import * as THREE from 'three';
 import { STYLE } from '../gfx';
-import { CharacterVisual } from './visual';
+import { CharacterVisual, type AnimState } from './visual';
 import { visualKeyFor } from './manifest';
 import { isSpriteSpikeKey } from '../sprites/manifest';
 import { SpriteCharacterVisual } from '../sprites/sprite_visual';
@@ -25,6 +25,7 @@ export interface ICharacterVisual {
   setShadow(on: boolean): void;
   setProxyShadow(on: boolean): void;
   setFar(far: boolean): void;
+  setCamera?(camera: THREE.Camera): void;
   dispose(): void;
 }
 

@@ -1,5 +1,5 @@
 import { createReadStream, cpSync, existsSync, statSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 
@@ -11,15 +11,22 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
+function resolveSpriteFile(requestUrl: string | undefined): string | null {
+  const raw = decodeURIComponent((requestUrl ?? '/').split('?')[0] ?? '/');
+  const rel = normalize(raw).replace(/^[/\\]+/, '');
+  const file = resolve(SPRITES_ROOT, rel);
+  if (file !== SPRITES_ROOT && !file.startsWith(SPRITES_ROOT + sep)) return null;
+  return file;
+}
+
 /** Serve repo-root /sprites in dev and copy into dist/ on production build. */
 function spritesStaticPlugin(): Plugin {
   return {
     name: 'sprites-static',
     configureServer(server) {
       server.middlewares.use('/sprites', (req, res, next) => {
-        const rel = decodeURIComponent((req.url ?? '/').split('?')[0] ?? '/');
-        const file = join(SPRITES_ROOT, rel);
-        if (!existsSync(file) || !statSync(file).isFile()) return next();
+        const file = resolveSpriteFile(req.url);
+        if (!file || !existsSync(file) || !statSync(file).isFile()) return next();
         res.setHeader('Content-Type', MIME[extname(file)] ?? 'application/octet-stream');
         createReadStream(file).pipe(res);
       });
