@@ -148,10 +148,7 @@ function buildProceduralAtlas(manifest: SpriteManifest): THREE.CanvasTexture {
   }
 
   const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
+  configureAtlasTexture(tex);
   return tex;
 }
 
@@ -222,6 +219,7 @@ function drawSpikeFrame(
 
 function configureAtlasTexture(tex: THREE.Texture): THREE.Texture {
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.flipY = true; // PNG/canvas top row → GPU v=1; pairs with uvRect + sprite applyFrame
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.magFilter = THREE.NearestFilter;

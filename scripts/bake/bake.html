@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sprite GLB Bake</title>
+</head>
+<body>
+  <script type="module" src="/tmp/glb_bake.bundle.js"></script>
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    const quick = params.get('quick') === '1';
+    const targets = params.has('targets')
+      ? JSON.parse(decodeURIComponent(params.get('targets')))
+      : window.__bakeTargetsFromManifest();
+    window.__bakeResults = await window.__bakeAll(targets, quick);
+  </script>
+</body>
+</html>
