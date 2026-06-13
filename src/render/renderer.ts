@@ -7,7 +7,7 @@ import {
   instanceOrigin, INSTANCE_SLOT_COUNT,
 } from '../sim/data';
 import type { BiomeId } from '../sim/types';
-import { AnimState, CharacterVisual, createCharacterVisual } from './characters';
+import { AnimState, createCharacterVisual, type ICharacterVisual } from './characters';
 import { LocoTrack, newLocoTrack, updateLocomotion } from './locomotion';
 import { buildProps } from './props';
 import { plankTexture, sparkleTexture } from './textures';
@@ -62,10 +62,10 @@ const DUNGEON_RIM_BOOST = 2.4;
 
 interface EntityView {
   group: THREE.Group;
-  /** rigged glTF visual for characters; null for object views (doors/crates) */
-  visual: CharacterVisual | null;
-  sheepVisual: CharacterVisual | null; // polymorph form, built lazily
-  bearVisual: CharacterVisual | null; // druid bear form, built lazily
+  /** rigged glTF or sprite impostor for characters; null for object views */
+  visual: ICharacterVisual | null;
+  sheepVisual: ICharacterVisual | null; // polymorph form, built lazily
+  bearVisual: ICharacterVisual | null; // druid bear form, built lazily
   /** unscaled height — nameplate/vfx anchor reads height * e.scale */
   height: number;
   /** what removeView pulls back out of clickTargets */
@@ -410,7 +410,7 @@ export class Renderer {
 
   private createView(e: Entity): void {
     const group = new THREE.Group();
-    let visual: CharacterVisual | null = null;
+    let visual: ICharacterVisual | null = null;
     let body: THREE.Group | null = null; // object views build meshes into this
     let height = 1.2;
     let sparkle: THREE.Sprite | undefined;
@@ -561,7 +561,7 @@ export class Renderer {
   }
 
   /** The visual the player currently sees (form swaps hide the base rig). */
-  private activeVisual(v: EntityView): CharacterVisual | null {
+  private activeVisual(v: EntityView): ICharacterVisual | null {
     if (v.sheepVisual?.root.visible) return v.sheepVisual;
     if (v.bearVisual?.root.visible) return v.bearVisual;
     return v.visual;
@@ -934,6 +934,10 @@ export class Renderer {
 
     this.updateNameplates();
     this.updateChatBubbles();
+    for (const v of this.views.values()) {
+      const av = this.activeVisual(v);
+      if (av && 'setCamera' in av) av.setCamera(this.camera);
+    }
     if (this.post) this.post.render();
     else this.webgl.render(this.scene, this.camera);
   }

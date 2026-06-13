@@ -10,6 +10,23 @@ import * as THREE from 'three';
 //   3. otherwise: software GL (SwiftShader/llvmpipe) -> low, real GPUs -> high
 
 export type GfxTier = 'low' | 'high' | 'ultra';
+export type RenderStyle = 'default' | 'sprite';
+
+/** Presentation style from `?style=sprite`; evaluated once at module load. */
+export function urlStyle(): RenderStyle {
+  if (typeof location === 'undefined') return 'default';
+  return new URLSearchParams(location.search).get('style') === 'sprite' ? 'sprite' : 'default';
+}
+
+export const STYLE: { readonly spriteMode: boolean } = { spriteMode: urlStyle() === 'sprite' };
+
+/** Sprite-mode pixel presentation knobs (post upscale + atlas sampling). */
+export const SPRITE_PRESENTATION = {
+  /** UV block size for the pixelate pass (higher = chunkier pixels). */
+  blockSize: 3,
+  /** Slightly punchier grade in sprite mode. */
+  saturation: 1.22,
+} as const;
 
 export interface GfxSettings {
   readonly tier: GfxTier;
@@ -32,7 +49,7 @@ export interface GfxSettings {
 }
 
 function settingsFor(tier: GfxTier): GfxSettings {
-  return {
+  const base: GfxSettings = {
     tier,
     composer: tier !== 'low',
     // N8AO runs on both composer tiers: half-res + Low quality on high keeps
@@ -48,6 +65,11 @@ function settingsFor(tier: GfxTier): GfxSettings {
     windSway: tier !== 'low',
     maxPointLights: tier === 'low' ? 3 : 6,
   };
+  // Sprite spike needs the post chain for pixel upscale even on the low tier.
+  if (STYLE.spriteMode) {
+    return { ...base, composer: true, pixelRatioCap: Math.min(base.pixelRatioCap, 1.5) };
+  }
+  return base;
 }
 
 /** Tier explicitly requested via URL, or null when it should be auto-detected. */

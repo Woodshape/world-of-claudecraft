@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { loadTexture } from './assets/loader';
 import { registerPreload } from './assets/preload';
-import { GFX } from './gfx';
+import { GFX, STYLE } from './gfx';
 
 // Spell & ambience particle system. One pooled THREE.Points cloud drawn with
 // additive blending; projectiles are lightweight emitters that home on their
@@ -81,8 +81,8 @@ function buildAtlasTexture(): THREE.CanvasTexture {
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = STYLE.spriteMode ? THREE.NearestFilter : THREE.LinearFilter;
+  tex.magFilter = STYLE.spriteMode ? THREE.NearestFilter : THREE.LinearFilter;
   tex.generateMipmaps = false;
   return tex;
 }

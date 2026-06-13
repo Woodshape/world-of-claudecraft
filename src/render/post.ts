@@ -5,7 +5,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { N8AOPass } from 'n8ao';
-import { GFX, sharedUniforms } from './gfx';
+import { GFX, sharedUniforms, STYLE, SPRITE_PRESENTATION } from './gfx';
 
 // Post chain: RenderPass -> N8AO (high: half-res Low, ultra: full-res Medium)
 // -> UnrealBloom -> OutputPass (ACES tonemap + sRGB, reads
@@ -58,11 +58,66 @@ const GradeShader = {
   `,
 };
 
+const PixelateShader = {
+  name: 'PixelateShader',
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uResolution: { value: new THREE.Vector2(1, 1) },
+    uBlockSize: { value: SPRITE_PRESENTATION.blockSize },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uResolution;
+    uniform float uBlockSize;
+    varying vec2 vUv;
+    void main() {
+      vec2 block = uBlockSize / uResolution;
+      vec2 uv = (floor(vUv / block) + 0.5) * block;
+      gl_FragColor = texture2D(tDiffuse, uv);
+    }
+  `,
+};
+
+const SpriteGradeShader = {
+  name: 'SpriteGradeShader',
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uTime: { value: 0 },
+  },
+  vertexShader: GradeShader.vertexShader,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    varying vec2 vUv;
+    const vec3 LIFT = vec3(0.018, 0.014, 0.022);
+    const vec3 GAIN = vec3(1.08, 1.04, 0.96);
+    const vec3 GAMMA = vec3(0.94);
+    void main() {
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      c = pow(max(vec3(0.0), c * GAIN + LIFT), GAMMA);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(vec3(l), c, ${SPRITE_PRESENTATION.saturation.toFixed(2)});
+      vec2 d = vUv - 0.5;
+      c *= 1.0 - 0.16 * smoothstep(0.62, 0.95, dot(d, d) * 2.2);
+      c += (fract(sin(dot(vUv * 731.7 + uTime, vec2(12.9898, 78.233))) * 43758.5) - 0.5) * 0.018;
+      gl_FragColor = vec4(c, 1.0);
+    }
+  `,
+};
+
 export interface PostPipeline {
   composer: EffectComposer;
   bloom: UnrealBloomPass;
   ao: N8AOPass | null;
   grade: ShaderPass;
+  pixelate: ShaderPass | null;
   setSize(width: number, height: number): void;
   render(): void;
 }
@@ -122,9 +177,16 @@ export function buildComposer(
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
-  const grade = new ShaderPass(GradeShader);
+  const grade = new ShaderPass(STYLE.spriteMode ? SpriteGradeShader : GradeShader);
   grade.uniforms.uTime = sharedUniforms.uTime; // shared clock drives the grain
   composer.addPass(grade);
+
+  let pixelate: ShaderPass | null = null;
+  if (STYLE.spriteMode) {
+    pixelate = new ShaderPass(PixelateShader);
+    pixelate.uniforms.uResolution.value.set(size.x, size.y);
+    composer.addPass(pixelate);
+  }
 
   // EffectComposer defaults its logical size to drawing-buffer pixels and
   // then multiplies by pixelRatio again when sizing passes — N8AO/bloom would
@@ -138,8 +200,13 @@ export function buildComposer(
     bloom,
     ao,
     grade,
+    pixelate,
     setSize(width: number, height: number): void {
       composer.setSize(width, height); // also resizes every pass (N8AO, bloom)
+      if (pixelate) {
+        const ratio = webgl.getPixelRatio();
+        pixelate.uniforms.uResolution.value.set(width * ratio, height * ratio);
+      }
     },
     render(): void {
       composer.render();
