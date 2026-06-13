@@ -54,4 +54,20 @@ export const SPRITE_MANIFESTS: Record<string, SpriteManifest> = {
       death: { row: 56, frames: 6, fps: 10, once: true },
     },
   },
+  mob_wolf: {
+    key: 'mob_wolf',
+    url: '/sprites/mobs/wolf.png',
+    dirs: 8,
+    frameSize: [96, 96],
+    anchor: [48, 90],
+    worldHeight: 1.6,
+    states: {
+      idle: { row: 0, frames: 4, fps: 6 },
+      walk: { row: 8, frames: 6, fps: 10 },
+      run: { row: 16, frames: 6, fps: 12 },
+      attack: { row: 24, frames: 5, fps: 12, once: true },
+      hit: { row: 32, frames: 3, fps: 12, once: true },
+      death: { row: 40, frames: 6, fps: 10, once: true },
+    },
+  },
 };

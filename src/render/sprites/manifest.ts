@@ -8,6 +8,7 @@ export const SPRITE_SPIKE_KEYS = new Set([
   'player_mage',
   'mob_kobold',
   'skel_minion',
+  'mob_wolf',
 ]);
 
 export function isSpriteSpikeKey(key: string): boolean {

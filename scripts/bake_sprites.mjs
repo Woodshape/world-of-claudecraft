@@ -200,6 +200,7 @@ function relOutPath(url) {
 }
 
 function emitManifest(results) {
+  validateBakedManifests(results);
   const entries = results.map((r) => {
     const states = Object.entries(r.states).map(([k, v]) => {
       const once = v.once ? ', once: true' : '';
@@ -226,6 +227,24 @@ ${entries},
 };
 `;
   writeFileSync(join(ROOT, 'src/render/sprites/manifest.generated.ts'), ts);
+}
+
+function validateBakedManifests(results) {
+  for (const r of results) {
+    if (r.dirs < 1) throw new Error(`${r.key}: dirs must be >= 1`);
+    const blocks = Object.entries(r.states).map(([name, st]) => {
+      if (st.frames < 1) throw new Error(`${r.key}.${name}: frames must be >= 1`);
+      if (st.row % r.dirs !== 0) {
+        throw new Error(`${r.key}.${name}: row ${st.row} not aligned to dirs ${r.dirs}`);
+      }
+      return { name, start: st.row, end: st.row + r.dirs };
+    }).sort((a, b) => a.start - b.start);
+    for (let i = 1; i < blocks.length; i++) {
+      if (blocks[i].start < blocks[i - 1].end) {
+        throw new Error(`${r.key}: overlapping state rows ${blocks[i - 1].name} and ${blocks[i].name}`);
+      }
+    }
+  }
 }
 
 async function runBrowserBake(base, quick) {

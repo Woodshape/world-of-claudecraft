@@ -21,7 +21,6 @@ export interface BakeStateSpec {
 export interface BakeTargetSpec {
   key: string;
   visualKey: string;
-  entityColor: number;
   dirs: number;
   frameSize: [number, number];
   /** Internal render resolution multiplier (nearest-downscaled in Node). */
@@ -77,13 +76,9 @@ async function preloadVisual(def: VisualDef): Promise<void> {
   for (const att of def.attach ?? []) await loadGltf(`/${att.url}`);
 }
 
-function tintFor(def: VisualDef, entityColor: number): number | null {
-  if (def.tint === undefined) return null;
-  return def.tint === 'entity' ? entityColor : def.tint;
-}
-
-function applyBakeMaterials(root: THREE.Object3D, def: VisualDef, entityColor: number): void {
-  const tint = tintFor(def, entityColor);
+/** Baked atlases stay untinted; entity/faction color is applied at runtime like GLB visuals. */
+function applyBakeMaterials(root: THREE.Object3D, def: VisualDef): void {
+  const tint = def.tint !== undefined && def.tint !== 'entity' ? def.tint : null;
   const strength = def.tintStrength ?? DEFAULT_TINT_STRENGTH;
   root.traverse((o) => {
     const mesh = o as THREE.Mesh;
@@ -163,13 +158,13 @@ interface NormalizedRig {
   height: number;
 }
 
-function prepareRig(def: VisualDef, entityColor: number): NormalizedRig {
+function prepareRig(def: VisualDef): NormalizedRig {
   const gltf = loadGltfSync(`/${def.url}`);
   const clips = new Map<string, THREE.AnimationClip>();
   for (const clip of gltf.animations) clips.set(clip.name, clip);
 
   const temp = assembleModel(def);
-  applyBakeMaterials(temp, def, entityColor);
+  applyBakeMaterials(temp, def);
 
   const idle = clips.get(def.clips.idle);
   if (idle) {
@@ -255,18 +250,18 @@ function buildStates(def: VisualDef, dirs: number): BakeStateSpec[] {
 }
 
 export function bakeTargetsFromManifest(): BakeTargetSpec[] {
-  const entries: Array<{ key: string; visualKey: string; entityColor: number; dirs: number; out: string }> = [
-    { key: 'player_mage', visualKey: 'player_mage', entityColor: 0xffffff, dirs: 8, out: '/sprites/chars/mage.png' },
-    { key: 'mob_kobold', visualKey: 'mob_kobold', entityColor: 0x9c640c, dirs: 8, out: '/sprites/mobs/kobold.png' },
-    { key: 'skel_minion', visualKey: 'skel_minion', entityColor: 0xd5dbdb, dirs: 8, out: '/sprites/mobs/skel_minion.png' },
+  const entries: Array<{ key: string; visualKey: string; dirs: number; out: string }> = [
+    { key: 'player_mage', visualKey: 'player_mage', dirs: 8, out: '/sprites/chars/mage.png' },
+    { key: 'mob_kobold', visualKey: 'mob_kobold', dirs: 8, out: '/sprites/mobs/kobold.png' },
+    { key: 'skel_minion', visualKey: 'skel_minion', dirs: 8, out: '/sprites/mobs/skel_minion.png' },
+    { key: 'mob_wolf', visualKey: 'mob_wolf', dirs: 8, out: '/sprites/mobs/wolf.png' },
   ];
-  return entries.map(({ key, visualKey, entityColor, dirs, out }) => {
+  return entries.map(({ key, visualKey, dirs, out }) => {
     const def = VISUALS[visualKey];
     if (!def) throw new Error(`unknown visual: ${visualKey}`);
     return {
       key,
       visualKey,
-      entityColor,
       dirs,
       frameSize: [96, 96],
       renderScale: 2.0,
@@ -274,6 +269,133 @@ export function bakeTargetsFromManifest(): BakeTargetSpec[] {
       states: buildStates(def, dirs),
     };
   });
+}
+
+const BOX_CORNERS = [
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+  new THREE.Vector3(),
+];
+
+function fillBoxCorners(box: THREE.Box3): THREE.Vector3[] {
+  const { min, max } = box;
+  BOX_CORNERS[0].set(min.x, min.y, min.z);
+  BOX_CORNERS[1].set(min.x, min.y, max.z);
+  BOX_CORNERS[2].set(min.x, max.y, min.z);
+  BOX_CORNERS[3].set(min.x, max.y, max.z);
+  BOX_CORNERS[4].set(max.x, min.y, min.z);
+  BOX_CORNERS[5].set(max.x, min.y, max.z);
+  BOX_CORNERS[6].set(max.x, max.y, min.z);
+  BOX_CORNERS[7].set(max.x, max.y, max.z);
+  return BOX_CORNERS;
+}
+
+function boundsFocus(box: THREE.Box3): { centerY: number } {
+  const size = box.getSize(new THREE.Vector3());
+  const headroomMaxY = box.max.y + size.y * 0.1;
+  const centerY = (box.min.y + headroomMaxY) * 0.5;
+  return { centerY };
+}
+
+/** Screen-space half-extents of an AABB in camera view space. */
+function screenExtentsInCamera(box: THREE.Box3, camera: THREE.Camera): { halfW: number; halfH: number } {
+  camera.updateMatrixWorld(true);
+  const inv = camera.matrixWorldInverse;
+  const v = new THREE.Vector3();
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const corner of fillBoxCorners(box)) {
+    v.copy(corner).applyMatrix4(inv);
+    minX = Math.min(minX, v.x);
+    maxX = Math.max(maxX, v.x);
+    minY = Math.min(minY, v.y);
+    maxY = Math.max(maxY, v.y);
+  }
+  return { halfW: (maxX - minX) * 0.5, halfH: (maxY - minY) * 0.5 };
+}
+
+/** One ortho half-size for every yaw — side views no longer shrink vs front/back. */
+function computeCaptureHalf(box: THREE.Box3, dirCount: number, padding = 1.14): number {
+  const { centerY } = boundsFocus(box);
+  let maxHalf = 0;
+  for (let d = 0; d < dirCount; d++) {
+    const probe = cameraForCapture(1, centerY, d, dirCount);
+    const { halfW, halfH } = screenExtentsInCamera(box, probe);
+    maxHalf = Math.max(maxHalf, halfW, halfH);
+  }
+  return Math.max(maxHalf * padding, 0.3);
+}
+
+function cameraForCapture(
+  half: number,
+  centerY: number,
+  dir: number,
+  dirCount: number,
+): THREE.OrthographicCamera {
+  const angle = (dir / dirCount) * TAU;
+  const dist = half * 8;
+  const cam = new THREE.OrthographicCamera(-half, half, half, -half, 0.01, half * 24);
+  cam.position.set(Math.sin(angle) * dist, centerY, Math.cos(angle) * dist);
+  cam.lookAt(0, centerY, 0);
+  cam.updateMatrixWorld(true);
+  return cam;
+}
+
+interface AlphaBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  contentW: number;
+  contentH: number;
+}
+
+function alphaBounds(src: Uint8Array, srcSize: number): AlphaBounds {
+  let minX = srcSize;
+  let minY = srcSize;
+  let maxX = 0;
+  let maxY = 0;
+  for (let y = 0; y < srcSize; y++) {
+    for (let x = 0; x < srcSize; x++) {
+      const a = src[(y * srcSize + x) * 4 + 3];
+      if (a < 12) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX <= minX) {
+    return { minX: 0, minY: 0, maxX: srcSize - 1, maxY: srcSize - 1, contentW: srcSize, contentH: srcSize };
+  }
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    contentW: maxX - minX + 1,
+    contentH: maxY - minY + 1,
+  };
+}
+
+function projectedDrawH(
+  contentW: number,
+  contentH: number,
+  frameW: number,
+  frameH: number,
+): number {
+  const topReserve = Math.round(frameH * 0.16);
+  const bottomReserve = Math.round(frameH * 0.05);
+  const availH = frameH - topReserve - bottomReserve;
+  const scale = Math.min((frameW * 0.86) / contentW, availH / contentH);
+  return Math.max(1, Math.round(contentH * scale));
 }
 
 function frameBounds(rig: NormalizedRig): THREE.Box3 {
@@ -304,29 +426,6 @@ function frameBounds(rig: NormalizedRig): THREE.Box3 {
     );
   }
   return box;
-}
-
-/** Ortho camera fitted to the posed bounds — keeps staff/hats inside the capture. */
-function cameraForBounds(box: THREE.Box3, dir: number, dirCount: number, padding = 1.32): THREE.OrthographicCamera {
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  // Extra headroom for staff tips / helms that sit above the body bounds.
-  box.max.y += size.y * 0.1;
-  center.y = (box.min.y + box.max.y) * 0.5;
-  size.y = box.max.y - box.min.y;
-  const angle = (dir / dirCount) * TAU;
-  const span = Math.max(size.x, size.y, size.z, 0.5) * padding;
-  const half = span * 0.54;
-  const cam = new THREE.OrthographicCamera(-half, half, half, -half, 0.01, span * 12);
-  const dist = span * 2.5;
-  cam.position.set(
-    center.x + Math.sin(angle) * dist,
-    center.y + size.y * 0.02,
-    center.z + Math.cos(angle) * dist,
-  );
-  cam.lookAt(center);
-  cam.updateMatrixWorld();
-  return cam;
 }
 
 function renderFrame(
@@ -362,37 +461,15 @@ function blitFrame(
   frameH: number,
   src: Uint8Array,
   srcSize: number,
+  fixedDrawH?: number,
 ): [number, number] {
   // Nearest downscale + alpha-aware crop with feet anchored near frame bottom center.
-  let minX = srcSize;
-  let minY = srcSize;
-  let maxX = 0;
-  let maxY = 0;
-  for (let y = 0; y < srcSize; y++) {
-    for (let x = 0; x < srcSize; x++) {
-      const a = src[(y * srcSize + x) * 4 + 3];
-      if (a < 12) continue;
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    }
-  }
-  if (maxX <= minX) {
-    minX = 0;
-    minY = 0;
-    maxX = srcSize - 1;
-    maxY = srcSize - 1;
-  }
-
-  const contentW = maxX - minX + 1;
-  const contentH = maxY - minY + 1;
+  const { minX, minY, maxX, maxY, contentW, contentH } = alphaBounds(src, srcSize);
   const topReserve = Math.round(frameH * 0.16);
   const bottomReserve = Math.round(frameH * 0.05);
-  const availH = frameH - topReserve - bottomReserve;
-  const scale = Math.min((frameW * 0.86) / contentW, availH / contentH);
+  const drawH = fixedDrawH ?? projectedDrawH(contentW, contentH, frameW, frameH);
+  const scale = drawH / contentH;
   const drawW = Math.max(1, Math.round(contentW * scale));
-  const drawH = Math.max(1, Math.round(contentH * scale));
   const destX0 = Math.round((frameW - drawW) * 0.5);
   const destY0 = frameH - bottomReserve - drawH;
 
@@ -475,7 +552,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
 
   for (const target of targets) {
     const def = VISUALS[target.visualKey];
-    const rig = prepareRig(def, target.entityColor);
+    const rig = prepareRig(def);
     initTextures(renderer, rig.root);
     scene.add(rig.root);
 
@@ -505,14 +582,37 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
 
     for (const plan of statePlans) {
       const clip = rig.clips.get(plan.spec.clip);
-      for (let d = 0; d < dirs; d++) {
-        for (let f = 0; f < plan.frames; f++) {
-          const t = plan.frames <= 1
-            ? 0
-            : (f / (plan.frames - 1)) * ((clip?.duration ?? 0.5) - 1e-4);
-          poseRig(rig, plan.spec.clip, t);
-          const bounds = frameBounds(rig);
-          const camera = cameraForBounds(bounds, d, dirs);
+      const stateDrawH: number[] = [];
+
+      for (let f = 0; f < plan.frames; f++) {
+        const t = plan.frames <= 1
+          ? 0
+          : (f / (plan.frames - 1)) * ((clip?.duration ?? 0.5) - 1e-4);
+        poseRig(rig, plan.spec.clip, t);
+        const bounds = frameBounds(rig);
+        const { centerY } = boundsFocus(bounds);
+        const captureHalf = computeCaptureHalf(bounds, dirs);
+        let maxDrawH = 0;
+        for (let d = 0; d < dirs; d++) {
+          const camera = cameraForCapture(captureHalf, centerY, d, dirs);
+          const raw = renderFrame(renderer, scene, camera, renderSize);
+          const ab = alphaBounds(raw, renderSize);
+          maxDrawH = Math.max(maxDrawH, projectedDrawH(ab.contentW, ab.contentH, frameW, frameH));
+        }
+        stateDrawH[f] = maxDrawH;
+      }
+
+      for (let f = 0; f < plan.frames; f++) {
+        const t = plan.frames <= 1
+          ? 0
+          : (f / (plan.frames - 1)) * ((clip?.duration ?? 0.5) - 1e-4);
+        poseRig(rig, plan.spec.clip, t);
+        const bounds = frameBounds(rig);
+        const { centerY } = boundsFocus(bounds);
+        const captureHalf = computeCaptureHalf(bounds, dirs);
+        const uniformDrawH = stateDrawH[f];
+        for (let d = 0; d < dirs; d++) {
+          const camera = cameraForCapture(captureHalf, centerY, d, dirs);
           const raw = renderFrame(renderer, scene, camera, renderSize);
           const foot = blitFrame(
             atlas,
@@ -524,6 +624,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
             frameH,
             raw,
             renderSize,
+            uniformDrawH,
           );
           if (plan.spec.name === 'idle' && d === 0 && f === 0) anchor = foot;
         }
@@ -538,7 +639,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
       width: atlasW,
       height: atlasH,
       rgbaB64: rgbaToB64(atlas),
-      dirs: target.dirs,
+      dirs,
       frameSize: target.frameSize,
       anchor,
       worldHeight: def.height,

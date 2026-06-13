@@ -50,7 +50,93 @@ const koboldCheck = await page.evaluate(() => {
 });
 console.log('kobold visual:', koboldCheck);
 
-// Rotate camera to verify directional sprites
+// Forest wolf pack — quadruped sprite validation
+await page.evaluate(() => {
+  const g = window.__game;
+  g.sim.player.pos.x = -15;
+  g.sim.player.pos.z = 55;
+  g.sim.player.facing = 0;
+  g.input.camYaw = Math.PI;
+});
+await new Promise((r) => setTimeout(r, 1200));
+await page.screenshot({ path: 'tmp/sprite_02b_wolf_pack.png' });
+
+const wolfCheck = await page.evaluate(() => {
+  const g = window.__game;
+  for (const e of g.sim.entities.values()) {
+    if (e.kind !== 'mob' || e.templateId !== 'forest_wolf') continue;
+    const view = g.renderer.views.get(e.id);
+    return view?.visual?.constructor?.name ?? null;
+  }
+  return null;
+});
+console.log('wolf visual:', wolfCheck);
+
+// Rotate camera to verify directional sprites and consistent on-screen size
+const rotationCheck = await page.evaluate(() => {
+  const g = window.__game;
+  const p = g.sim.player;
+  const pv = g.renderer.views.get(g.sim.playerId);
+  const visual = pv?.visual;
+  const sprite = visual?.root?.children?.find((c) => c.type === 'Sprite');
+  const map = sprite?.material?.map;
+  if (!visual?.setCamera || !sprite || !map?.image) {
+    return { ok: false, reason: 'missing sprite setup' };
+  }
+
+  const img = map.image;
+  const atlasW = img.width;
+  const atlasH = img.height;
+  const fw = Math.max(1, Math.round(map.repeat.x * atlasW));
+  const fh = Math.max(1, Math.round(map.repeat.y * atlasH));
+  const canvas = document.createElement('canvas');
+  canvas.width = fw;
+  canvas.height = fh;
+  const ctx = canvas.getContext('2d');
+
+  function frameOpaqueHeight() {
+    const offset = sprite.material.map.offset;
+    const repeat = sprite.material.map.repeat;
+    const sx = Math.round(offset.x * atlasW);
+    const sy = Math.round((1 - offset.y - repeat.y) * atlasH);
+    ctx.clearRect(0, 0, fw, fh);
+    ctx.drawImage(img, sx, sy, fw, fh, 0, 0, fw, fh);
+    const data = ctx.getImageData(0, 0, fw, fh).data;
+    let minY = fh;
+    let maxY = -1;
+    for (let y = 0; y < fh; y++) {
+      for (let x = 0; x < fw; x++) {
+        if (data[(y * fw + x) * 4 + 3] > 12) {
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+    return maxY >= minY ? maxY - minY + 1 : 0;
+  }
+
+  const heights = [];
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    g.renderer.camera.position.set(
+      p.pos.x + Math.sin(a) * 10,
+      p.pos.y + 4,
+      p.pos.z + Math.cos(a) * 10,
+    );
+    g.renderer.camera.lookAt(p.pos.x, p.pos.y + 1.5, p.pos.z);
+    visual.setCamera(g.renderer.camera);
+    heights.push(frameOpaqueHeight());
+  }
+  const min = Math.min(...heights);
+  const max = Math.max(...heights);
+  return {
+    ok: min > 0 && max / min <= 1.12,
+    heights,
+    ratio: min > 0 ? max / min : null,
+  };
+});
+console.log('rotation size check:', JSON.stringify(rotationCheck));
+
 for (let i = 0; i < 4; i++) {
   await page.evaluate(() => { window.__game.input.camYaw += Math.PI / 2; });
   await new Promise((r) => setTimeout(r, 600));
@@ -139,11 +225,13 @@ console.log('sprite check:', JSON.stringify(spriteCheck));
 const ok = spriteCheck.style === 'sprite'
   && spriteCheck.playerVisual === 'SpriteCharacterVisual'
   && koboldCheck === 'SpriteCharacterVisual'
+  && wolfCheck === 'SpriteCharacterVisual'
   && skelCheck === 'SpriteCharacterVisual'
   && spriteCheck.hasBlobShadow
   && spriteCheck.hasSprite
   && spriteCheck.atlasLoaded
   && spriteCheck.directionBuckets >= 3
+  && rotationCheck.ok
   && cast.ok;
 console.log(ok ? 'SPRITE RUNTIME: OK' : 'SPRITE RUNTIME: FAIL');
 console.log(errors.length ? 'ERRORS: ' + errors.join('; ') : 'no page errors');

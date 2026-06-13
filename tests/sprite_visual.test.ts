@@ -166,13 +166,35 @@ describe('SpriteCharacterVisual', () => {
 });
 
 describe('SpriteCharacterVisual mob manifests', () => {
-  it('loads kobold and skeleton minion manifests', () => {
-    for (const key of ['mob_kobold', 'skel_minion'] as const) {
+  it('loads kobold, skeleton, and wolf minion manifests', () => {
+    for (const key of ['mob_kobold', 'skel_minion', 'mob_wolf'] as const) {
       const manifest = spriteManifestFor(key)!;
       seedSpriteAtlasForTest(manifest);
       const v = new SpriteCharacterVisual(key, 0xffffff);
       expect(v.height).toBe(manifest.worldHeight);
       v.dispose();
     }
+  });
+});
+
+describe('SpriteCharacterVisual material tint', () => {
+  it('ignores entity color when the visual manifest has no tint', () => {
+    seedSpriteAtlasForTest(spriteManifestFor('player_mage')!);
+    const v = new SpriteCharacterVisual('player_mage', 0xff0000);
+    const { r, g, b } = spriteMaterial(v).color;
+    expect(r).toBeCloseTo(1, 5);
+    expect(g).toBeCloseTo(1, 5);
+    expect(b).toBeCloseTo(1, 5);
+    v.dispose();
+  });
+
+  it('lerps entity tint like CharacterVisual instead of replacing the atlas color', () => {
+    seedSpriteAtlasForTest(spriteManifestFor('mob_kobold')!);
+    const v = new SpriteCharacterVisual('mob_kobold', 0xff0000);
+    const { r, g, b } = spriteMaterial(v).color;
+    expect(r).toBeCloseTo(1, 5);
+    expect(g).toBeCloseTo(0.8, 1);
+    expect(b).toBeCloseTo(0.8, 1);
+    v.dispose();
   });
 });

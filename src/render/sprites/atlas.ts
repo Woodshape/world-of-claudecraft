@@ -306,6 +306,61 @@ export function framePixelRect(manifest: SpriteManifest, row: number, col: numbe
   };
 }
 
+/** Opaque pixel span inside one atlas frame (top-left PNG origin). */
+export function frameOpaqueExtents(
+  rgba: Uint8Array,
+  atlasW: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  alphaThreshold = 12,
+): { minY: number; maxY: number; height: number; width: number } | null {
+  let minX = w;
+  let minY = h;
+  let maxX = -1;
+  let maxY = -1;
+  for (let fy = 0; fy < h; fy++) {
+    for (let fx = 0; fx < w; fx++) {
+      const a = rgba[((y + fy) * atlasW + (x + fx)) * 4 + 3];
+      if (a < alphaThreshold) continue;
+      minX = Math.min(minX, fx);
+      minY = Math.min(minY, fy);
+      maxX = Math.max(maxX, fx);
+      maxY = Math.max(maxY, fy);
+    }
+  }
+  if (maxX < minX) return null;
+  return {
+    minY,
+    maxY,
+    height: maxY - minY + 1,
+    width: maxX - minX + 1,
+  };
+}
+
+/** Max/min opaque height ratio across idle direction rows — catches side-view shrink. */
+export function idleDirectionHeightRatio(
+  rgba: Uint8Array,
+  atlasW: number,
+  manifest: SpriteManifest,
+): number | null {
+  const idle = manifest.states.idle;
+  if (!idle) return null;
+  const [fw, fh] = manifest.frameSize;
+  const heights: number[] = [];
+  for (let d = 0; d < manifest.dirs; d++) {
+    const rect = framePixelRect(manifest, idle.row + d, 0);
+    const ext = frameOpaqueExtents(rgba, atlasW, rect.x, rect.y, fw, fh);
+    if (ext) heights.push(ext.height);
+  }
+  if (heights.length < 2) return null;
+  const min = Math.min(...heights);
+  const max = Math.max(...heights);
+  if (min <= 0) return null;
+  return max / min;
+}
+
 /** Resolve state + direction + frame into atlas coordinates and UVs. */
 export function resolveSpriteFrame(
   manifest: SpriteManifest,

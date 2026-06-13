@@ -3,6 +3,7 @@
 // sim, networking, or interaction logic.
 import * as THREE from 'three';
 import type { AnimState } from '../characters/visual';
+import { VISUALS } from '../characters/manifest';
 import {
   directionIndex, loadSpriteAtlas, resolveSpriteFrame, spriteAtlasInstance, spriteAtlasReady,
 } from './atlas';
@@ -13,6 +14,20 @@ const TAU = Math.PI * 2;
 const RUN_SPEED_THRESHOLD = 4.5;
 const HIT_REACT_COOLDOWN = 0.9;
 const ONESHOT_FADE = 0.1;
+const DEFAULT_TINT_STRENGTH = 0.4;
+
+/** Match CharacterVisual material tint — lerp toward manifest tint, not a flat multiply. */
+function applySpriteMaterialTint(
+  material: THREE.SpriteMaterial,
+  key: string,
+  entityColor: number,
+): void {
+  const def = VISUALS[key];
+  if (!def || def.tint === undefined) return;
+  const tint = def.tint === 'entity' ? entityColor : def.tint;
+  const strength = def.tintStrength ?? DEFAULT_TINT_STRENGTH;
+  material.color.lerp(new THREE.Color(tint), strength);
+}
 
 let clickGeoSingleton: THREE.CylinderGeometry | null = null;
 function clickGeo(): THREE.CylinderGeometry {
@@ -70,9 +85,7 @@ export class SpriteCharacterVisual {
       alphaTest: 0.08,
       depthWrite: false,
     });
-    if (entityColor !== 0xffffff) {
-      this.material.color = new THREE.Color(entityColor);
-    }
+    applySpriteMaterialTint(this.material, key, entityColor);
 
     this.sprite = new THREE.Sprite(this.material);
     this.sprite.center.set(
