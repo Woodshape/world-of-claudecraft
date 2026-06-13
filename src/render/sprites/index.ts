@@ -11,5 +11,5 @@ if (STYLE.spriteMode) {
 }
 
 export { SpriteCharacterVisual } from './sprite_visual';
-export { directionIndex } from './atlas';
+export { directionIndex, resolveSpriteFrame, spriteAtlasLayout, validateSpriteManifest } from './atlas';
 export { isSpriteSpikeKey, SPRITE_SPIKE_KEYS } from './manifest';

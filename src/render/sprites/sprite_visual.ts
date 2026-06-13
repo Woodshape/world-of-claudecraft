@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import type { AnimState } from '../characters/visual';
 import {
-  directionIndex, loadSpriteAtlas, spriteAtlasInstance, spriteAtlasReady, uvRect,
+  directionIndex, loadSpriteAtlas, resolveSpriteFrame, spriteAtlasInstance, spriteAtlasReady,
 } from './atlas';
 import { spriteManifestFor } from './manifest';
 import type { SpriteAnimState, SpriteManifest, SpriteStateDef } from './types';
@@ -249,12 +249,12 @@ export class SpriteCharacterVisual {
   }
 
   private applyFrame(): void {
-    const row = this.currentState.row + this.dirIdx;
-    const col = Math.min(this.frameIdx, this.currentState.frames - 1);
-    const rect = uvRect(this.manifest, row, col);
+    const frame = resolveSpriteFrame(
+      this.manifest, this.currentState, this.dirIdx, this.frameIdx,
+    );
     if (this.material.map) {
-      this.material.map.repeat.set(rect.u1 - rect.u0, rect.v1 - rect.v0);
-      this.material.map.offset.set(rect.u0, rect.v0);
+      this.material.map.repeat.set(frame.u1 - frame.u0, frame.v1 - frame.v0);
+      this.material.map.offset.set(frame.u0, frame.v0);
       this.material.needsUpdate = true;
     }
   }

@@ -32,20 +32,103 @@ const SPIKE_PALETTES: Record<string, { body: string; trim: string; accent: strin
   skel_minion: { body: '#c8c4b8', trim: '#6a6660', accent: '#f0ece0' },
 };
 
-function atlasDimensions(manifest: SpriteManifest): { cols: number; rows: number } {
+export interface SpriteAtlasLayout {
+  cols: number;
+  rows: number;
+  width: number;
+  height: number;
+  frameWidth: number;
+  frameHeight: number;
+}
+
+/** Packed atlas grid size derived from manifest state rows and frame counts. */
+export function spriteAtlasLayout(manifest: SpriteManifest): SpriteAtlasLayout {
   let maxCol = 0;
   let maxRow = manifest.dirs;
   for (const st of Object.values(manifest.states)) {
     maxCol = Math.max(maxCol, st.frames);
     maxRow = Math.max(maxRow, st.row + manifest.dirs);
   }
-  return { cols: maxCol, rows: maxRow };
+  const [frameWidth, frameHeight] = manifest.frameSize;
+  return {
+    cols: maxCol,
+    rows: maxRow,
+    width: maxCol * frameWidth,
+    height: maxRow * frameHeight,
+    frameWidth,
+    frameHeight,
+  };
+}
+
+export interface SpriteFrameRect {
+  row: number;
+  col: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  u0: number;
+  v0: number;
+  u1: number;
+  v1: number;
+}
+
+/** Validate manifest row grouping (state blocks × direction rows). */
+export function validateSpriteManifest(manifest: SpriteManifest): string | null {
+  if (manifest.dirs < 1) return 'dirs must be >= 1';
+  const [fw, fh] = manifest.frameSize;
+  if (fw <= 0 || fh <= 0) return 'frameSize must be positive';
+  const [ax, ay] = manifest.anchor;
+  if (ax < 0 || ax > fw || ay < 0 || ay > fh) return 'anchor outside frame';
+  if (manifest.worldHeight <= 0) return 'worldHeight must be positive';
+
+  const entries = Object.entries(manifest.states);
+  if (entries.length === 0) return 'states must not be empty';
+
+  const blocks = entries.map(([key, st]) => {
+    if (st.frames < 1) return `${key}: frames must be >= 1`;
+    if (st.fps <= 0) return `${key}: fps must be > 0`;
+    if (st.row < 0) return `${key}: row must be >= 0`;
+    if (st.row % manifest.dirs !== 0) {
+      return `${key}: row ${st.row} must align to direction blocks (multiple of ${manifest.dirs})`;
+    }
+    return null;
+  });
+  const blockErr = blocks.find((e) => e !== null);
+  if (blockErr) return blockErr;
+
+  const sorted = entries
+    .map(([key, st]) => ({ key, start: st.row, end: st.row + manifest.dirs }))
+    .sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].start < sorted[i - 1].end) {
+      return `overlapping state rows: ${sorted[i - 1].key} and ${sorted[i].key}`;
+    }
+  }
+  return null;
+}
+
+function textureImageSize(tex: THREE.Texture): { width: number; height: number } | null {
+  const img = tex.image as { width?: number; height?: number } | undefined;
+  if (!img?.width || !img?.height) return null;
+  return { width: img.width, height: img.height };
+}
+
+function assertAtlasTextureSize(tex: THREE.Texture, manifest: SpriteManifest): void {
+  const expected = spriteAtlasLayout(manifest);
+  const got = textureImageSize(tex);
+  if (!got) return;
+  if (got.width !== expected.width || got.height !== expected.height) {
+    console.warn(
+      `sprite atlas size mismatch for ${manifest.key}: expected ${expected.width}x${expected.height}, got ${got.width}x${got.height}`,
+    );
+  }
 }
 
 /** Procedural pixel-art atlas for the Phase 1 spike when baked PNGs are absent. */
 function buildProceduralAtlas(manifest: SpriteManifest): THREE.CanvasTexture {
   const [fw, fh] = manifest.frameSize;
-  const { cols, rows } = atlasDimensions(manifest);
+  const { cols, rows } = spriteAtlasLayout(manifest);
   const palette = SPIKE_PALETTES[manifest.key] ?? { body: '#888', trim: '#444', accent: '#ccc' };
 
   const canvas = document.createElement('canvas');
@@ -153,16 +236,22 @@ export function loadSpriteAtlas(manifest: SpriteManifest): Promise<THREE.Texture
 
   let pending = atlasPromises.get(manifest.key);
   if (!pending) {
-    pending = loadTexture(manifest.url, { srgb: true })
-      .then((tex) => configureAtlasTexture(tex))
-      .catch(() => {
-        const proc = buildProceduralAtlas(manifest);
-        return proc;
-      })
-      .then((tex) => {
-        atlasCache.set(manifest.key, tex);
-        return tex;
-      });
+    const manifestErr = validateSpriteManifest(manifest);
+    if (manifestErr) {
+      pending = Promise.reject(new Error(`invalid sprite manifest ${manifest.key}: ${manifestErr}`));
+    } else {
+      pending = loadTexture(manifest.url, { srgb: true })
+        .then((tex) => {
+          configureAtlasTexture(tex);
+          assertAtlasTextureSize(tex, manifest);
+          return tex;
+        })
+        .catch(() => buildProceduralAtlas(manifest))
+        .then((tex) => {
+          atlasCache.set(manifest.key, tex);
+          return tex;
+        });
+    }
     atlasPromises.set(manifest.key, pending);
     registerPreload(pending);
   }
@@ -180,7 +269,7 @@ export function spriteAtlasInstance(tex: THREE.Texture): THREE.Texture {
 
 /** Test hook: install a minimal atlas texture without loading PNGs or canvas. */
 export function seedSpriteAtlasForTest(manifest: SpriteManifest): THREE.Texture {
-  const { cols, rows } = atlasDimensions(manifest);
+  const { cols, rows } = spriteAtlasLayout(manifest);
   const [fw, fh] = manifest.frameSize;
   const data = new Uint8Array(cols * fw * rows * fh * 4);
   const tex = new THREE.DataTexture(data, cols * fw, rows * fh);
@@ -196,13 +285,37 @@ export function uvRect(
   row: number,
   col: number,
 ): { u0: number; v0: number; u1: number; v1: number } {
-  const { cols, rows } = atlasDimensions(manifest);
-  const [fw, fh] = manifest.frameSize;
-  const texW = cols * fw;
-  const texH = rows * fh;
+  const { width: texW, height: texH, frameWidth: fw, frameHeight: fh } = spriteAtlasLayout(manifest);
   const u0 = (col * fw) / texW;
   const u1 = ((col + 1) * fw) / texW;
   const v1 = 1 - (row * fh) / texH;
   const v0 = 1 - ((row + 1) * fh) / texH;
   return { u0, v0, u1, v1 };
+}
+
+/** Pixel-space frame rect within the packed atlas (top-left origin). */
+export function framePixelRect(manifest: SpriteManifest, row: number, col: number): SpriteFrameRect {
+  const { frameWidth: fw, frameHeight: fh } = spriteAtlasLayout(manifest);
+  const uv = uvRect(manifest, row, col);
+  return {
+    row,
+    col,
+    x: col * fw,
+    y: row * fh,
+    w: fw,
+    h: fh,
+    ...uv,
+  };
+}
+
+/** Resolve state + direction + frame into atlas coordinates and UVs. */
+export function resolveSpriteFrame(
+  manifest: SpriteManifest,
+  state: { row: number; frames: number },
+  dirIdx: number,
+  frameIdx: number,
+): SpriteFrameRect {
+  const row = state.row + dirIdx;
+  const col = Math.min(Math.max(0, frameIdx), state.frames - 1);
+  return framePixelRect(manifest, row, col);
 }
