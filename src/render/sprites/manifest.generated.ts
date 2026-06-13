@@ -58,8 +58,8 @@ export const SPRITE_MANIFESTS: Record<string, SpriteManifest> = {
     key: 'mob_wolf',
     url: '/sprites/mobs/wolf.png',
     dirs: 8,
-    frameSize: [96, 96],
-    anchor: [48, 90],
+    frameSize: [128, 96],
+    anchor: [64, 90],
     worldHeight: 1.6,
     states: {
       idle: { row: 0, frames: 4, fps: 6 },

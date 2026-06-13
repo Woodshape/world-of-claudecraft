@@ -132,7 +132,6 @@ describe('sprite bake pipeline outputs', () => {
 
   it('idle direction rows have consistent opaque height (no side-view shrink)', () => {
     const MAX_RATIO = 1.12;
-    const QUADRUPED_MAX_RATIO = 2.0;
     for (const manifest of Object.values(SPRITE_MANIFESTS)) {
       if (!manifest.states.idle || manifest.dirs < 4) continue;
       const path = join(ROOT, manifest.url.replace(/^\/+/, ''));
@@ -140,8 +139,7 @@ describe('sprite bake pipeline outputs', () => {
       const { width, rgba } = readPngRgba(path);
       const ratio = idleDirectionHeightRatio(rgba, width, manifest);
       expect(ratio, `${manifest.key} idle direction height ratio`).not.toBeNull();
-      const cap = manifest.key === 'mob_wolf' ? QUADRUPED_MAX_RATIO : MAX_RATIO;
-      expect(ratio!, `${manifest.key} side vs front/back`).toBeLessThanOrEqual(cap);
+      expect(ratio!, `${manifest.key} side vs front/back`).toBeLessThanOrEqual(MAX_RATIO);
     }
   });
 

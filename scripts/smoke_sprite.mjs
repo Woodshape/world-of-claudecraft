@@ -140,8 +140,20 @@ const wolfSideCheck = await page.evaluate(() => {
     if (m) samples.push({ i, ...m });
   }
   const wide = samples.filter((s) => s.width > fw * 0.55);
+  const narrow = samples.filter((s) => s.width <= fw * 0.55);
   const clipped = wide.some((s) => s.marginL < 4 || s.marginR < 4);
-  return { ok: wide.length > 0 && !clipped, wide, samples };
+  const heights = samples.map((s) => s.height);
+  const minH = Math.min(...heights);
+  const maxH = Math.max(...heights);
+  const ratio = minH > 0 ? maxH / minH : null;
+  return {
+    ok: wide.length > 0 && !clipped && ratio !== null && ratio <= 1.12,
+    ratio,
+    wide,
+    narrowHeights: narrow.map((s) => s.height),
+    wideHeights: wide.map((s) => s.height),
+    samples,
+  };
 });
 console.log('wolf side check:', JSON.stringify(wolfSideCheck));
 

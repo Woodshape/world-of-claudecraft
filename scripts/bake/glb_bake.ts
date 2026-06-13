@@ -255,11 +255,12 @@ export function bakeTargetsFromManifest(): BakeTargetSpec[] {
   return entries.map(({ key, visualKey, dirs, out }) => {
     const def = VISUALS[visualKey];
     if (!def) throw new Error(`unknown visual: ${visualKey}`);
+    const frameSize: [number, number] = visualKey === 'mob_wolf' ? [128, 96] : [96, 96];
     return {
       key,
       visualKey,
       dirs,
-      frameSize: [96, 96],
+      frameSize,
       renderScale: visualKey === 'mob_wolf' ? 2.75 : 2.0,
       url: out,
       states: buildStates(def, dirs),
@@ -411,15 +412,6 @@ function projectedScale(
   return Math.min((frameW * 0.90) / contentW, availH / contentH);
 }
 
-function projectedDrawH(
-  contentW: number,
-  contentH: number,
-  frameW: number,
-  frameH: number,
-): number {
-  return Math.max(1, Math.round(contentH * projectedScale(contentW, contentH, frameW, frameH)));
-}
-
 function frameBounds(rig: NormalizedRig): THREE.Box3 {
   const box = new THREE.Box3();
   const v = new THREE.Vector3();
@@ -483,17 +475,13 @@ function blitFrame(
   frameH: number,
   src: Uint8Array,
   srcSize: number,
-  fixedDrawH?: number,
+  fixedScale?: number,
 ): [number, number] {
   // Nearest downscale + alpha-aware crop with feet anchored near frame bottom center.
   const { minX, minY, maxX, maxY, contentW, contentH } = alphaBounds(src, srcSize);
   const topReserve = Math.round(frameH * 0.16);
   const bottomReserve = Math.round(frameH * 0.05);
-  const maxDrawW = frameW * 0.90;
-  let scale = fixedDrawH !== undefined
-    ? fixedDrawH / contentH
-    : projectedScale(contentW, contentH, frameW, frameH);
-  if (contentW * scale > maxDrawW) scale = maxDrawW / contentW;
+  const scale = fixedScale ?? projectedScale(contentW, contentH, frameW, frameH);
   const drawH = Math.max(1, Math.round(contentH * scale));
   const drawW = Math.max(1, Math.round(contentW * scale));
   const destX0 = Math.round((frameW - drawW) * 0.5);
@@ -608,7 +596,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
 
     for (const plan of statePlans) {
       const clip = rig.clips.get(plan.spec.clip);
-      const stateDrawH: number[] = [];
+      const stateScale: number[] = [];
 
       for (let f = 0; f < plan.frames; f++) {
         const t = plan.frames <= 1
@@ -620,17 +608,17 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
         const captureHalf = computeCaptureHalf(
           bounds,
           dirs,
-          target.visualKey === 'mob_wolf' ? 1.32 : 1.18,
-          target.visualKey === 'mob_wolf' ? 0.16 : 0.08,
+          1.18,
+          0.08,
         );
-        let maxDrawH = 0;
+        let minScale = Infinity;
         for (let d = 0; d < dirs; d++) {
           const camera = cameraForCapture(captureHalf, center, d, dirs);
           const raw = renderFrame(renderer, scene, camera, renderSize);
           const ab = alphaBounds(raw, renderSize);
-          maxDrawH = Math.max(maxDrawH, projectedDrawH(ab.contentW, ab.contentH, frameW, frameH));
+          minScale = Math.min(minScale, projectedScale(ab.contentW, ab.contentH, frameW, frameH));
         }
-        stateDrawH[f] = maxDrawH;
+        stateScale[f] = minScale;
       }
 
       for (let f = 0; f < plan.frames; f++) {
@@ -643,10 +631,10 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
         const captureHalf = computeCaptureHalf(
           bounds,
           dirs,
-          target.visualKey === 'mob_wolf' ? 1.32 : 1.18,
-          target.visualKey === 'mob_wolf' ? 0.16 : 0.08,
+          1.18,
+          0.08,
         );
-        const uniformDrawH = stateDrawH[f];
+        const uniformScale = stateScale[f];
         for (let d = 0; d < dirs; d++) {
           const camera = cameraForCapture(captureHalf, center, d, dirs);
           const raw = renderFrame(renderer, scene, camera, renderSize);
@@ -660,7 +648,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
             frameH,
             raw,
             renderSize,
-            uniformDrawH,
+            uniformScale,
           );
           if (plan.spec.name === 'idle' && d === 0 && f === 0) anchor = foot;
         }
