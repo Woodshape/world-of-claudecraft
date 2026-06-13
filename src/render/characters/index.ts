@@ -3,6 +3,7 @@
 // with the preload gate, so createCharacterVisual is synchronous by the time
 // the Renderer constructs views.
 import type { Entity } from '../../sim/types';
+import * as THREE from 'three';
 import { STYLE } from '../gfx';
 import { CharacterVisual } from './visual';
 import { visualKeyFor } from './manifest';
@@ -13,7 +14,21 @@ import '../sprites';
 export { CharacterVisual } from './visual';
 export type { AnimState } from './visual';
 
-export type ICharacterVisual = CharacterVisual | SpriteCharacterVisual;
+/** Shared runtime surface for GLB rigs and directional sprite impostors. */
+export interface ICharacterVisual {
+  readonly root: THREE.Group;
+  readonly height: number;
+  readonly clickProxy: THREE.Mesh;
+  update(dt: number, s: AnimState, animate: boolean): void;
+  playAttack(): void;
+  playHit(): void;
+  setShadow(on: boolean): void;
+  setProxyShadow(on: boolean): void;
+  setFar(far: boolean): void;
+  dispose(): void;
+}
+
+export type CharacterVisualLike = ICharacterVisual;
 
 /** Build the visual for an entity (or an explicit form key: polymorph/bear). */
 export function createCharacterVisual(e: Entity, formKey?: 'form_sheep' | 'form_bear'): ICharacterVisual {

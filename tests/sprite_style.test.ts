@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest';
+import { parseSearchParams } from '../src/render/gfx';
 import { directionIndex } from '../src/render/sprites/atlas';
 import { isSpriteSpikeKey, SPRITE_SPIKE_KEYS } from '../src/render/sprites/manifest';
+
+describe('parseSearchParams', () => {
+  it('reads normal style and gfx params', () => {
+    const p = parseSearchParams('?style=sprite&gfx=high');
+    expect(p.get('style')).toBe('sprite');
+    expect(p.get('gfx')).toBe('high');
+  });
+
+  it('recovers double-encoded query strings', () => {
+    const p = parseSearchParams('?style%3Dsprite%26gfx%3Dhigh');
+    expect(p.get('style')).toBe('sprite');
+    expect(p.get('gfx')).toBe('high');
+  });
+});
 
 describe('sprite directionIndex', () => {
   it('returns 0 when camera is behind entity facing +Z', () => {

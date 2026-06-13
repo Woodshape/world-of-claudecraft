@@ -10,6 +10,7 @@
     "build": "node scripts/build_media_manifest.mjs generate && vite build && node scripts/build_media_manifest.mjs emit",
     "preview": "vite preview",
     "test": "vitest run",
+    "smoke:sprite": "node scripts/smoke_sprite.mjs",
     "bake:sprites": "node scripts/bake_sprites.mjs",
     "build:env": "esbuild headless/env_server.ts --bundle --platform=node --format=cjs --outfile=dist-env/env_server.cjs",
     "env": "npm run build:env && node dist-env/env_server.cjs",

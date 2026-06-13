@@ -173,6 +173,19 @@ export function spriteAtlasReady(manifest: SpriteManifest): THREE.Texture | null
   return atlasCache.get(manifest.key) ?? null;
 }
 
+/** Test hook: install a minimal atlas texture without loading PNGs or canvas. */
+export function seedSpriteAtlasForTest(manifest: SpriteManifest): THREE.Texture {
+  const { cols, rows } = atlasDimensions(manifest);
+  const [fw, fh] = manifest.frameSize;
+  const data = new Uint8Array(cols * fw * rows * fh * 4);
+  const tex = new THREE.DataTexture(data, cols * fw, rows * fh);
+  tex.needsUpdate = true;
+  configureAtlasTexture(tex);
+  atlasCache.set(manifest.key, tex);
+  atlasPromises.set(manifest.key, Promise.resolve(tex));
+  return tex;
+}
+
 export function uvRect(
   manifest: SpriteManifest,
   row: number,

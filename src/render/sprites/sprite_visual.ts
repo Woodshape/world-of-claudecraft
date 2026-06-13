@@ -114,16 +114,11 @@ export class SpriteCharacterVisual {
 
   setCamera(camera: THREE.Camera): void {
     this.camera = camera;
-    camera.getWorldPosition(this.tmpCam);
-    this.root.getWorldPosition(this.tmpEnt);
-    const parent = this.root.parent as THREE.Object3D | null;
-    const facing = parent ? parent.rotation.y : this.root.rotation.y;
-    const dirs = this.far ? Math.max(4, Math.floor(this.dirCount / 2)) : this.dirCount;
-    this.dirIdx = directionIndex(this.tmpCam.x, this.tmpCam.z, this.tmpEnt.x, this.tmpEnt.z, facing, dirs);
-    this.applyFrame();
+    this.refreshDirection();
   }
 
   update(dt: number, s: AnimState, animate: boolean): void {
+    if (this.camera) this.refreshDirection();
     this.hitCooldown = Math.max(0, this.hitCooldown - dt);
 
     if (s.dead && !this.wasDead) this.enterDeath();
@@ -168,7 +163,7 @@ export class SpriteCharacterVisual {
   }
 
   playHit(): void {
-    if (this.deadLock || this.hitCooldown > 0 || !this.manifest.states.hit) return;
+    if (this.deadLock || this.oneShot || this.hitCooldown > 0 || !this.manifest.states.hit) return;
     this.hitCooldown = HIT_REACT_COOLDOWN;
     this.playOneShot('hit');
   }
@@ -198,6 +193,21 @@ export class SpriteCharacterVisual {
 
   private tmpCam = new THREE.Vector3();
   private tmpEnt = new THREE.Vector3();
+
+  private refreshDirection(): void {
+    if (!this.camera) return;
+    this.camera.getWorldPosition(this.tmpCam);
+    this.root.getWorldPosition(this.tmpEnt);
+    const parent = this.root.parent as THREE.Object3D | null;
+    const facing = parent ? parent.rotation.y : this.root.rotation.y;
+    const dirs = this.far ? Math.max(4, Math.floor(this.dirCount / 2)) : this.dirCount;
+    const next = directionIndex(
+      this.tmpCam.x, this.tmpCam.z, this.tmpEnt.x, this.tmpEnt.z, facing, dirs,
+    );
+    if (next === this.dirIdx) return;
+    this.dirIdx = next;
+    this.applyFrame();
+  }
 
   private desiredState(s: AnimState): SpriteAnimState {
     if (s.swimming && this.manifest.states.swim) return 'swim';

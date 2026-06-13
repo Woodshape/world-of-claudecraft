@@ -1,5 +1,5 @@
-// Phase 1 sprite style spike smoke test: ?style=sprite, mage player, kobold
-// outdoor camp, Hollow Crypt skeleton, fireball projectile.
+// Phase 2 sprite runtime smoke test: ?style=sprite, directional sprites,
+// animation API, blob shadows, and baked atlas loading.
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
 
@@ -39,6 +39,17 @@ await page.evaluate(() => {
 await new Promise((r) => setTimeout(r, 1200));
 await page.screenshot({ path: 'tmp/sprite_02_kobold_camp.png' });
 
+const koboldCheck = await page.evaluate(() => {
+  const g = window.__game;
+  for (const e of g.sim.entities.values()) {
+    if (e.kind !== 'mob' || e.templateId !== 'tunnel_rat') continue;
+    const view = g.renderer.views.get(e.id);
+    return view?.visual?.constructor?.name ?? null;
+  }
+  return null;
+});
+console.log('kobold visual:', koboldCheck);
+
 // Rotate camera to verify directional sprites
 for (let i = 0; i < 4; i++) {
   await page.evaluate(() => { window.__game.input.camYaw += Math.PI / 2; });
@@ -57,6 +68,17 @@ await page.evaluate(() => {
 });
 await new Promise((r) => setTimeout(r, 2000));
 await page.screenshot({ path: 'tmp/sprite_04_crypt.png' });
+
+const skelCheck = await page.evaluate(() => {
+  const g = window.__game;
+  for (const e of g.sim.entities.values()) {
+    if (e.kind !== 'mob' || e.templateId !== 'restless_bones') continue;
+    const view = g.renderer.views.get(e.id);
+    return view?.visual?.constructor?.name ?? null;
+  }
+  return null;
+});
+console.log('skeleton visual:', skelCheck);
 
 // Cast fireball at nearest mob
 const cast = await page.evaluate(() => {
@@ -83,21 +105,47 @@ await page.screenshot({ path: 'tmp/sprite_05_fireball.png' });
 
 const spriteCheck = await page.evaluate(() => {
   const g = window.__game;
+  const p = g.sim.player;
   const pv = g.renderer.views.get(g.sim.playerId);
   const visual = pv?.visual;
+  const sprite = visual?.root?.children?.find((c) => c.type === 'Sprite');
+  const blob = visual?.root?.children?.find((c) => c.type === 'Mesh' && c.geometry?.type === 'CircleGeometry');
+  const offsets = [];
+  if (visual?.setCamera) {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      g.renderer.camera.position.set(
+        p.pos.x + Math.sin(a) * 10,
+        p.pos.y + 4,
+        p.pos.z + Math.cos(a) * 10,
+      );
+      g.renderer.camera.lookAt(p.pos.x, p.pos.y + 1.5, p.pos.z);
+      visual.setCamera(g.renderer.camera);
+      offsets.push(sprite?.material?.map?.offset?.y ?? null);
+    }
+  }
+  const uniqueOffsets = new Set(offsets.filter((v) => v !== null));
   return {
     style: new URLSearchParams(location.search).get('style'),
     playerVisual: visual?.constructor?.name ?? null,
-    hasBlobShadow: !!visual?.root?.children?.some((c) => c.type === 'Mesh' && c.geometry?.type === 'CircleGeometry'),
+    hasBlobShadow: !!blob,
+    hasSprite: !!sprite,
+    atlasLoaded: !!sprite?.material?.map,
+    directionBuckets: uniqueOffsets.size,
   };
 });
 console.log('sprite check:', JSON.stringify(spriteCheck));
 
 const ok = spriteCheck.style === 'sprite'
   && spriteCheck.playerVisual === 'SpriteCharacterVisual'
+  && koboldCheck === 'SpriteCharacterVisual'
+  && skelCheck === 'SpriteCharacterVisual'
   && spriteCheck.hasBlobShadow
+  && spriteCheck.hasSprite
+  && spriteCheck.atlasLoaded
+  && spriteCheck.directionBuckets >= 3
   && cast.ok;
-console.log(ok ? 'SPRITE SPIKE: OK' : 'SPRITE SPIKE: FAIL');
+console.log(ok ? 'SPRITE RUNTIME: OK' : 'SPRITE RUNTIME: FAIL');
 console.log(errors.length ? 'ERRORS: ' + errors.join('; ') : 'no page errors');
 
 await browser.close();

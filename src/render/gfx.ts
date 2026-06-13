@@ -12,10 +12,29 @@ import * as THREE from 'three';
 export type GfxTier = 'low' | 'high' | 'ultra';
 export type RenderStyle = 'default' | 'sprite';
 
+/** Parse a query string, recovering from double-encoded ?style%3Dsprite%26gfx%3Dhigh links. */
+export function parseSearchParams(search: string): URLSearchParams {
+  const raw = search.startsWith('?') ? search.slice(1) : search;
+  let params = new URLSearchParams(raw);
+  const keys = [...params.keys()];
+  if (keys.length === 1 && keys[0]!.includes('=') && params.get(keys[0]!) === '' && !params.has('style')) {
+    return new URLSearchParams(keys[0]!);
+  }
+  if (!params.has('style') && !params.has('gfx') && raw.includes('%3D')) {
+    return new URLSearchParams(decodeURIComponent(raw));
+  }
+  return params;
+}
+
+function urlParams(): URLSearchParams {
+  if (typeof location === 'undefined') return new URLSearchParams();
+  return parseSearchParams(location.search);
+}
+
 /** Presentation style from `?style=sprite`; evaluated once at module load. */
 export function urlStyle(): RenderStyle {
   if (typeof location === 'undefined') return 'default';
-  return new URLSearchParams(location.search).get('style') === 'sprite' ? 'sprite' : 'default';
+  return urlParams().get('style') === 'sprite' ? 'sprite' : 'default';
 }
 
 export const STYLE: { readonly spriteMode: boolean } = { spriteMode: urlStyle() === 'sprite' };
@@ -75,7 +94,7 @@ function settingsFor(tier: GfxTier): GfxSettings {
 /** Tier explicitly requested via URL, or null when it should be auto-detected. */
 export function urlForcedTier(): GfxTier | null {
   if (typeof location === 'undefined') return null;
-  const params = new URLSearchParams(location.search);
+  const params = urlParams();
   if (params.has('lowgfx')) return 'low';
   const g = params.get('gfx');
   return g === 'low' || g === 'high' || g === 'ultra' ? g : null;
