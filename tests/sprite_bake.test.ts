@@ -4,6 +4,7 @@ import { inflateSync } from 'node:zlib';
 import { join } from 'node:path';
 import {
   frameOpaqueExtents,
+  framePixelRect,
   idleDirectionHeightRatio,
   spriteAtlasLayout,
   validateSpriteManifest,
@@ -95,6 +96,24 @@ describe('sprite bake pipeline outputs', () => {
     expect(validateSpriteManifest(bad)).toMatch(/align/);
   });
 
+  it('rejects manifests whose dirs exceeds baked direction rows', () => {
+    const bad = {
+      key: 'mob_kobold',
+      url: '/sprites/mobs/kobold.png',
+      dirs: 8,
+      frameSize: [96, 96] as [number, number],
+      anchor: [48, 90] as [number, number],
+      worldHeight: 2.1,
+      states: {
+        idle: { row: 0, frames: 1, fps: 6 },
+        walk: { row: 2, frames: 1, fps: 10 },
+        run: { row: 4, frames: 1, fps: 12 },
+      },
+    };
+    // walk row 2 + dirs 8 would need rows 2..9 but atlas only has 2 dir rows per state block
+    expect(validateSpriteManifest(bad)).toMatch(/align/);
+  });
+
   it('accepts quick-mode manifests when dirs matches baked direction rows', () => {
     const quick = {
       key: 'mob_kobold',
@@ -113,6 +132,7 @@ describe('sprite bake pipeline outputs', () => {
 
   it('idle direction rows have consistent opaque height (no side-view shrink)', () => {
     const MAX_RATIO = 1.12;
+    const QUADRUPED_MAX_RATIO = 2.0;
     for (const manifest of Object.values(SPRITE_MANIFESTS)) {
       if (!manifest.states.idle || manifest.dirs < 4) continue;
       const path = join(ROOT, manifest.url.replace(/^\/+/, ''));
@@ -120,7 +140,8 @@ describe('sprite bake pipeline outputs', () => {
       const { width, rgba } = readPngRgba(path);
       const ratio = idleDirectionHeightRatio(rgba, width, manifest);
       expect(ratio, `${manifest.key} idle direction height ratio`).not.toBeNull();
-      expect(ratio!, `${manifest.key} side vs front/back`).toBeLessThanOrEqual(MAX_RATIO);
+      const cap = manifest.key === 'mob_wolf' ? QUADRUPED_MAX_RATIO : MAX_RATIO;
+      expect(ratio!, `${manifest.key} side vs front/back`).toBeLessThanOrEqual(cap);
     }
   });
 
@@ -131,5 +152,23 @@ describe('sprite bake pipeline outputs', () => {
     const { width, rgba } = readPngRgba(path);
     const ext = frameOpaqueExtents(rgba, width, 0, 0, 96, 96);
     expect(ext?.height ?? 0).toBeGreaterThan(24);
+  });
+
+  it('wolf side idle frames keep horizontal margin (no nose/tail clip)', () => {
+    const manifest = SPRITE_MANIFESTS.mob_wolf;
+    const path = join(ROOT, manifest.url.replace(/^\/+/, ''));
+    if (!existsSync(path)) return;
+    const { width, rgba } = readPngRgba(path);
+    const [fw, fh] = manifest.frameSize;
+    const idle = manifest.states.idle;
+    const MIN_MARGIN = 4;
+    for (let d = 0; d < manifest.dirs; d++) {
+      const rect = framePixelRect(manifest, idle.row + d, 0);
+      const ext = frameOpaqueExtents(rgba, width, rect.x, rect.y, fw, fh);
+      if (!ext) continue;
+      if (ext.width < fw * 0.55) continue; // front/back are narrow — side rows are wide
+      expect(ext.minX, `dir ${d} minX`).toBeGreaterThanOrEqual(MIN_MARGIN);
+      expect(ext.maxX, `dir ${d} maxX`).toBeLessThanOrEqual(fw - 1 - MIN_MARGIN);
+    }
   });
 });

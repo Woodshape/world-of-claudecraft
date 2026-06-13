@@ -72,6 +72,79 @@ const wolfCheck = await page.evaluate(() => {
 });
 console.log('wolf visual:', wolfCheck);
 
+const wolfSideCheck = await page.evaluate(() => {
+  const g = window.__game;
+  let wolfView = null;
+  for (const e of g.sim.entities.values()) {
+    if (e.kind !== 'mob' || e.templateId !== 'forest_wolf') continue;
+    wolfView = g.renderer.views.get(e.id);
+    break;
+  }
+  const visual = wolfView?.visual;
+  const sprite = visual?.root?.children?.find((c) => c.type === 'Sprite');
+  const map = sprite?.material?.map;
+  if (!visual?.setCamera || !sprite || !map?.image) return { ok: false, reason: 'no wolf sprite' };
+
+  const img = map.image;
+  const atlasW = img.width;
+  const atlasH = img.height;
+  const fw = Math.max(1, Math.round(map.repeat.x * atlasW));
+  const fh = Math.max(1, Math.round(map.repeat.y * atlasH));
+  const canvas = document.createElement('canvas');
+  canvas.width = fw;
+  canvas.height = fh;
+  const ctx = canvas.getContext('2d');
+
+  function frameMargins() {
+    const offset = map.offset;
+    const repeat = map.repeat;
+    const sx = Math.round(offset.x * atlasW);
+    const sy = Math.round((1 - offset.y - repeat.y) * atlasH);
+    ctx.clearRect(0, 0, fw, fh);
+    ctx.drawImage(img, sx, sy, fw, fh, 0, 0, fw, fh);
+    const data = ctx.getImageData(0, 0, fw, fh).data;
+    let minX = fw, maxX = -1, minY = fh, maxY = -1;
+    for (let y = 0; y < fh; y++) {
+      for (let x = 0; x < fw; x++) {
+        if (data[(y * fw + x) * 4 + 3] > 12) {
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+    if (maxX < minX) return null;
+    return {
+      minX, maxX, width: maxX - minX + 1, height: maxY - minY + 1,
+      marginL: minX, marginR: fw - 1 - maxX,
+    };
+  }
+
+  const samples = [];
+  let wolfEnt = null;
+  for (const e of g.sim.entities.values()) {
+    if (e.kind === 'mob' && e.templateId === 'forest_wolf') { wolfEnt = e; break; }
+  }
+  if (!wolfEnt) return { ok: false, reason: 'no wolf entity' };
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    g.renderer.camera.position.set(
+      wolfEnt.pos.x + Math.sin(a) * 8,
+      wolfEnt.pos.y + 2.5,
+      wolfEnt.pos.z + Math.cos(a) * 8,
+    );
+    g.renderer.camera.lookAt(wolfEnt.pos.x, wolfEnt.pos.y + 0.8, wolfEnt.pos.z);
+    visual.setCamera(g.renderer.camera);
+    const m = frameMargins();
+    if (m) samples.push({ i, ...m });
+  }
+  const wide = samples.filter((s) => s.width > fw * 0.55);
+  const clipped = wide.some((s) => s.marginL < 4 || s.marginR < 4);
+  return { ok: wide.length > 0 && !clipped, wide, samples };
+});
+console.log('wolf side check:', JSON.stringify(wolfSideCheck));
+
 // Rotate camera to verify directional sprites and consistent on-screen size
 const rotationCheck = await page.evaluate(() => {
   const g = window.__game;
@@ -226,6 +299,7 @@ const ok = spriteCheck.style === 'sprite'
   && spriteCheck.playerVisual === 'SpriteCharacterVisual'
   && koboldCheck === 'SpriteCharacterVisual'
   && wolfCheck === 'SpriteCharacterVisual'
+  && wolfSideCheck.ok
   && skelCheck === 'SpriteCharacterVisual'
   && spriteCheck.hasBlobShadow
   && spriteCheck.hasSprite

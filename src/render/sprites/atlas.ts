@@ -315,7 +315,7 @@ export function frameOpaqueExtents(
   w: number,
   h: number,
   alphaThreshold = 12,
-): { minY: number; maxY: number; height: number; width: number } | null {
+): { minX: number; maxX: number; minY: number; maxY: number; height: number; width: number } | null {
   let minX = w;
   let minY = h;
   let maxX = -1;
@@ -332,6 +332,8 @@ export function frameOpaqueExtents(
   }
   if (maxX < minX) return null;
   return {
+    minX,
+    maxX,
     minY,
     maxY,
     height: maxY - minY + 1,

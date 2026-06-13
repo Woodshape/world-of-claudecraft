@@ -8,7 +8,6 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { VISUALS, type ClipMap, type VisualDef } from '../../src/render/characters/manifest';
 
 const TAU = Math.PI * 2;
-const DEFAULT_TINT_STRENGTH = 0.4;
 
 export interface BakeStateSpec {
   name: string;
@@ -76,10 +75,8 @@ async function preloadVisual(def: VisualDef): Promise<void> {
   for (const att of def.attach ?? []) await loadGltf(`/${att.url}`);
 }
 
-/** Baked atlases stay untinted; entity/faction color is applied at runtime like GLB visuals. */
-function applyBakeMaterials(root: THREE.Object3D, def: VisualDef): void {
-  const tint = def.tint !== undefined && def.tint !== 'entity' ? def.tint : null;
-  const strength = def.tintStrength ?? DEFAULT_TINT_STRENGTH;
+/** Baked atlases are untinted source art; all color grading happens at runtime via applySpriteMaterialTint. */
+function applyBakeMaterials(root: THREE.Object3D, _def: VisualDef): void {
   root.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (!mesh.isMesh) return;
@@ -92,7 +89,6 @@ function applyBakeMaterials(root: THREE.Object3D, def: VisualDef): void {
       alphaTest: 0.04,
     });
     if (src.map) src.map.colorSpace = THREE.SRGBColorSpace;
-    if (tint !== null) mat.color.lerp(new THREE.Color(tint), strength);
     mesh.material = mat;
   });
 }
@@ -264,7 +260,7 @@ export function bakeTargetsFromManifest(): BakeTargetSpec[] {
       visualKey,
       dirs,
       frameSize: [96, 96],
-      renderScale: 2.0,
+      renderScale: visualKey === 'mob_wolf' ? 2.75 : 2.0,
       url: out,
       states: buildStates(def, dirs),
     };
@@ -295,11 +291,12 @@ function fillBoxCorners(box: THREE.Box3): THREE.Vector3[] {
   return BOX_CORNERS;
 }
 
-function boundsFocus(box: THREE.Box3): { centerY: number } {
+function boundsFocus(box: THREE.Box3): { center: THREE.Vector3; centerY: number } {
   const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
   const headroomMaxY = box.max.y + size.y * 0.1;
-  const centerY = (box.min.y + headroomMaxY) * 0.5;
-  return { centerY };
+  center.y = (box.min.y + headroomMaxY) * 0.5;
+  return { center, centerY: center.y };
 }
 
 /** Screen-space half-extents of an AABB in camera view space. */
@@ -322,12 +319,25 @@ function screenExtentsInCamera(box: THREE.Box3, camera: THREE.Camera): { halfW: 
 }
 
 /** One ortho half-size for every yaw — side views no longer shrink vs front/back. */
-function computeCaptureHalf(box: THREE.Box3, dirCount: number, padding = 1.14): number {
-  const { centerY } = boundsFocus(box);
+function computeCaptureHalf(
+  box: THREE.Box3,
+  dirCount: number,
+  padding = 1.18,
+  capturePadXZ = 0.08,
+): number {
+  const size = box.getSize(new THREE.Vector3());
+  const captureBox = box.clone();
+  const padXZ = Math.max(size.x, size.z) * capturePadXZ;
+  captureBox.min.x -= padXZ;
+  captureBox.max.x += padXZ;
+  captureBox.min.z -= padXZ;
+  captureBox.max.z += padXZ;
+  captureBox.max.y += size.y * 0.05;
+  const { center } = boundsFocus(captureBox);
   let maxHalf = 0;
   for (let d = 0; d < dirCount; d++) {
-    const probe = cameraForCapture(1, centerY, d, dirCount);
-    const { halfW, halfH } = screenExtentsInCamera(box, probe);
+    const probe = cameraForCapture(1, center, d, dirCount);
+    const { halfW, halfH } = screenExtentsInCamera(captureBox, probe);
     maxHalf = Math.max(maxHalf, halfW, halfH);
   }
   return Math.max(maxHalf * padding, 0.3);
@@ -335,15 +345,19 @@ function computeCaptureHalf(box: THREE.Box3, dirCount: number, padding = 1.14): 
 
 function cameraForCapture(
   half: number,
-  centerY: number,
+  center: THREE.Vector3,
   dir: number,
   dirCount: number,
 ): THREE.OrthographicCamera {
   const angle = (dir / dirCount) * TAU;
   const dist = half * 8;
   const cam = new THREE.OrthographicCamera(-half, half, half, -half, 0.01, half * 24);
-  cam.position.set(Math.sin(angle) * dist, centerY, Math.cos(angle) * dist);
-  cam.lookAt(0, centerY, 0);
+  cam.position.set(
+    center.x + Math.sin(angle) * dist,
+    center.y,
+    center.z + Math.cos(angle) * dist,
+  );
+  cam.lookAt(center);
   cam.updateMatrixWorld(true);
   return cam;
 }
@@ -385,7 +399,7 @@ function alphaBounds(src: Uint8Array, srcSize: number): AlphaBounds {
   };
 }
 
-function projectedDrawH(
+function projectedScale(
   contentW: number,
   contentH: number,
   frameW: number,
@@ -394,8 +408,16 @@ function projectedDrawH(
   const topReserve = Math.round(frameH * 0.16);
   const bottomReserve = Math.round(frameH * 0.05);
   const availH = frameH - topReserve - bottomReserve;
-  const scale = Math.min((frameW * 0.86) / contentW, availH / contentH);
-  return Math.max(1, Math.round(contentH * scale));
+  return Math.min((frameW * 0.90) / contentW, availH / contentH);
+}
+
+function projectedDrawH(
+  contentW: number,
+  contentH: number,
+  frameW: number,
+  frameH: number,
+): number {
+  return Math.max(1, Math.round(contentH * projectedScale(contentW, contentH, frameW, frameH)));
 }
 
 function frameBounds(rig: NormalizedRig): THREE.Box3 {
@@ -467,8 +489,12 @@ function blitFrame(
   const { minX, minY, maxX, maxY, contentW, contentH } = alphaBounds(src, srcSize);
   const topReserve = Math.round(frameH * 0.16);
   const bottomReserve = Math.round(frameH * 0.05);
-  const drawH = fixedDrawH ?? projectedDrawH(contentW, contentH, frameW, frameH);
-  const scale = drawH / contentH;
+  const maxDrawW = frameW * 0.90;
+  let scale = fixedDrawH !== undefined
+    ? fixedDrawH / contentH
+    : projectedScale(contentW, contentH, frameW, frameH);
+  if (contentW * scale > maxDrawW) scale = maxDrawW / contentW;
+  const drawH = Math.max(1, Math.round(contentH * scale));
   const drawW = Math.max(1, Math.round(contentW * scale));
   const destX0 = Math.round((frameW - drawW) * 0.5);
   const destY0 = frameH - bottomReserve - drawH;
@@ -590,11 +616,16 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
           : (f / (plan.frames - 1)) * ((clip?.duration ?? 0.5) - 1e-4);
         poseRig(rig, plan.spec.clip, t);
         const bounds = frameBounds(rig);
-        const { centerY } = boundsFocus(bounds);
-        const captureHalf = computeCaptureHalf(bounds, dirs);
+        const { center } = boundsFocus(bounds);
+        const captureHalf = computeCaptureHalf(
+          bounds,
+          dirs,
+          target.visualKey === 'mob_wolf' ? 1.32 : 1.18,
+          target.visualKey === 'mob_wolf' ? 0.16 : 0.08,
+        );
         let maxDrawH = 0;
         for (let d = 0; d < dirs; d++) {
-          const camera = cameraForCapture(captureHalf, centerY, d, dirs);
+          const camera = cameraForCapture(captureHalf, center, d, dirs);
           const raw = renderFrame(renderer, scene, camera, renderSize);
           const ab = alphaBounds(raw, renderSize);
           maxDrawH = Math.max(maxDrawH, projectedDrawH(ab.contentW, ab.contentH, frameW, frameH));
@@ -608,11 +639,16 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
           : (f / (plan.frames - 1)) * ((clip?.duration ?? 0.5) - 1e-4);
         poseRig(rig, plan.spec.clip, t);
         const bounds = frameBounds(rig);
-        const { centerY } = boundsFocus(bounds);
-        const captureHalf = computeCaptureHalf(bounds, dirs);
+        const { center } = boundsFocus(bounds);
+        const captureHalf = computeCaptureHalf(
+          bounds,
+          dirs,
+          target.visualKey === 'mob_wolf' ? 1.32 : 1.18,
+          target.visualKey === 'mob_wolf' ? 0.16 : 0.08,
+        );
         const uniformDrawH = stateDrawH[f];
         for (let d = 0; d < dirs; d++) {
-          const camera = cameraForCapture(captureHalf, centerY, d, dirs);
+          const camera = cameraForCapture(captureHalf, center, d, dirs);
           const raw = renderFrame(renderer, scene, camera, renderSize);
           const foot = blitFrame(
             atlas,
@@ -639,7 +675,7 @@ export async function bakeAll(targets: BakeTargetSpec[], quick = false): Promise
       width: atlasW,
       height: atlasH,
       rgbaB64: rgbaToB64(atlas),
-      dirs,
+      dirs, // actual baked direction rows (2 in quick mode, target.dirs otherwise)
       frameSize: target.frameSize,
       anchor,
       worldHeight: def.height,
