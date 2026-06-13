@@ -355,6 +355,11 @@ export interface Entity {
   prevPos: Vec3; // for render interpolation
   facing: number; // radians, 0 = +Z
   prevFacing: number;
+  // online clients only: when this entity's last wire update landed and the
+  // measured update cadence — distant entities are sent below snapshot rate,
+  // so each interpolates on its own clock (see ClientWorld.applySnapshot)
+  netUpdatedAt?: number;
+  netInterval?: number;
   vy: number; // vertical velocity (jumping/falling)
   onGround: boolean;
   fallStartY: number;

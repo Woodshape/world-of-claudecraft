@@ -8,7 +8,27 @@ import { saveCharacterState, openPlaySession, closePlaySession, insertChatLogs }
 import { ChatLogger } from './chat_log';
 
 const WORLD_SEED = 20061;
-const INTEREST_RADIUS = 120;
+// Interest management: the client renders entities out to 80yd, so new
+// entities enter interest just past that, and known entities persist a
+// little farther so the boundary doesn't churn create/destroy cycles.
+const INTEREST_RADIUS = 90;
+const INTEREST_DROP_RADIUS = 100;
+// Stationary quest/vendor npcs anchor map markers, so they keep the legacy
+// radius; once known they cost a handful of bytes per snapshot anyway.
+const NPC_INTEREST_RADIUS = 120;
+const NPC_DROP_RADIUS = 130;
+// the widest radius any entity kind can be relevant at
+const INTEREST_QUERY_RADIUS = NPC_DROP_RADIUS;
+// Distance-tiered update rates: full snapshot rate inside nameplate range
+// (55yd, beyond every ability range), half rate out to the 80yd draw range,
+// quarter rate beyond. The viewer's target and anything attacking the
+// viewer always update at full rate regardless of distance.
+const FULL_RATE_RADIUS_SQ = 55 * 55;
+const HALF_RATE_RADIUS_SQ = 80 * 80;
+const HALF_RATE_DIVISOR = 2;
+const QUARTER_RATE_DIVISOR = 4;
+// cached wire fragments of despawned entities are swept once a minute
+const WIRE_CACHE_SWEEP_TICKS = 1200;
 const EVENT_RADIUS = 90;
 const AUTOSAVE_SECONDS = 30;
 const CHAT_RATE_BURST = 5;
@@ -37,6 +57,21 @@ export interface ClientSession {
   // serialized form of each delta self field as last sent to this client;
   // a field is omitted from a snapshot while its serialization is unchanged
   lastSent: Record<string, string>;
+  // wire versions of each entity this client knows about: known entities
+  // get identity-less "lite" records, unchanged ones ride in the keep list
+  sentEnts: Map<number, SentEntityVersions>;
+}
+
+interface SentEntityVersions {
+  idVer: number;
+  dynVer: number;
+  // sim tick of the last full/lite record, so distance-tiered rates hold
+  // even when one broadcast covers several catch-up sim ticks
+  sentAtTick: number;
+  // an entity whose state stopped changing gets one final "settle" record
+  // before riding the keep list — without it the client's extrapolation
+  // would leave it rendered slightly past where it actually stopped
+  settled: boolean;
 }
 
 export interface AdminServerStats {
@@ -73,18 +108,27 @@ interface WireAura {
   dur: number;
 }
 
-function wireEntity(e: Entity): Record<string, unknown> {
+// Identity fields rarely change, so they ride only in "full" records: on an
+// entity's first snapshot for a session and again whenever one of them
+// changes. The client treats their absence in a record as "unchanged".
+function identityFields(e: Entity): Record<string, unknown> {
+  const out: Record<string, unknown> = { k: e.kind, tid: e.templateId, nm: e.name, lv: e.level };
+  if (e.dungeonId) out.dgn = e.dungeonId;
+  if (e.scale !== 1) out.sc = e.scale;
+  if (e.color !== 0xffffff) out.c = e.color;
+  return out;
+}
+
+// Dynamic fields are re-sent whole in every full or lite record, so the
+// conditional ones keep their absent-means-unset semantics.
+function dynamicFields(e: Entity): Record<string, unknown> {
   const out: Record<string, unknown> = {
-    id: e.id, k: e.kind, tid: e.templateId, nm: e.name, lv: e.level,
     x: round2(e.pos.x), y: round2(e.pos.y), z: round2(e.pos.z), f: round2(e.facing),
     hp: e.hp, mhp: e.maxHp,
   };
   if (e.dead) out.dead = 1;
   if (e.lootable) out.loot = 1;
   if (e.hostile) out.h = 1;
-  if (e.dungeonId) out.dgn = e.dungeonId;
-  if (e.scale !== 1) out.sc = e.scale;
-  if (e.color !== 0xffffff) out.c = e.color;
   if (e.castingAbility) {
     out.cast = e.castingAbility;
     out.castRem = round2(e.castRemaining);
@@ -101,6 +145,45 @@ function wireEntity(e: Entity): Record<string, unknown> {
     out.lootList = { copper: e.loot.copper, items: e.loot.items };
   }
   return out;
+}
+
+export function wireEntity(e: Entity): Record<string, unknown> {
+  return { id: e.id, ...identityFields(e), ...dynamicFields(e) };
+}
+
+// npcs stay visible to the legacy radius (see the constants above);
+// everything else enters at INTEREST_RADIUS and known entities persist to
+// the drop radius — hysteresis against churn at the boundary
+function interestLimitSq(e: Entity, known: boolean): number {
+  if (e.kind === 'npc') {
+    return known ? NPC_DROP_RADIUS * NPC_DROP_RADIUS : NPC_INTEREST_RADIUS * NPC_INTEREST_RADIUS;
+  }
+  return known ? INTEREST_DROP_RADIUS * INTEREST_DROP_RADIUS : INTEREST_RADIUS * INTEREST_RADIUS;
+}
+
+// full rate close up and for anything the viewer is fighting; mid range
+// updates every other tick, far entities every fourth. Measured against
+// the per-session last-sent tick rather than a tick-parity stagger: when
+// the event loop degrades and one broadcast covers several sim ticks, a
+// parity check can stay permanently false and starve entities frozen
+function isUpdateDue(tick: number, e: Entity, d2: number, viewer: Entity, sentAtTick: number): boolean {
+  if (d2 <= FULL_RATE_RADIUS_SQ) return true;
+  if (viewer.targetId === e.id || e.aggroTargetId === viewer.id) return true;
+  const divisor = d2 <= HALF_RATE_RADIUS_SQ ? HALF_RATE_DIVISOR : QUARTER_RATE_DIVISOR;
+  return tick - sentAtTick >= divisor;
+}
+
+// Per-entity wire fragments, refreshed lazily at most once per tick and
+// shared by every recipient. The version counters bump only when the
+// serialized form actually changes, making per-session diffing O(1).
+interface EntityWireCache {
+  tick: number;
+  idJson: string;
+  dynJson: string;
+  idVer: number;
+  dynVer: number;
+  fullJson: string;
+  liteJson: string;
 }
 
 function round2(v: number): number {
@@ -161,6 +244,8 @@ export class GameServer {
   sim: Sim;
   clients = new Map<number, ClientSession>(); // by pid
   readonly chatLog = new ChatLogger(insertChatLogs);
+  private wireCache = new Map<number, EntityWireCache>();
+  private lastWireSweepTick = 0;
   private interval: NodeJS.Timeout | null = null;
   private saveTimer = 0;
   private readonly startedAt = Date.now();
@@ -220,6 +305,7 @@ export class GameServer {
       chatTokens: CHAT_RATE_BURST, chatLastRefill: Date.now() / 1000, chatLastRateError: 0,
       chatRateViolations: 0, chatCooldownUntil: 0,
       lastSent: {},
+      sentEnts: new Map(),
     };
     this.clients.set(pid, session);
     this.peakOnline = Math.max(this.peakOnline, this.clients.size);
@@ -468,25 +554,100 @@ export class GameServer {
 
   private broadcastSnapshots(): void {
     if (this.clients.size === 0) return;
-    // each entity is serialized at most once per tick, shared by every
-    // recipient whose interest area contains it
-    const entJson = new Map<number, string>();
-    const head = `{"t":"snap","tick":${this.sim.tickCount},"time":${round2(this.sim.time)}`;
+    const tick = this.sim.tickCount;
+    const head = `{"t":"snap","tick":${tick},"time":${round2(this.sim.time)}`;
     for (const session of this.clients.values()) {
       const p = this.sim.entities.get(session.pid);
       const meta = this.sim.meta(session.pid);
       if (!p || !meta) continue;
       const ents: string[] = [];
-      this.sim.grid.forEachInRadius(p.pos.x, p.pos.z, INTEREST_RADIUS, (e) => {
+      const keep: number[] = [];
+      const present = new Set<number>();
+      this.sim.grid.forEachInRadius(p.pos.x, p.pos.z, INTEREST_QUERY_RADIUS, (e, d2) => {
         if (e.id === session.pid) return;
-        let json = entJson.get(e.id);
-        if (json === undefined) {
-          json = JSON.stringify(wireEntity(e));
-          entJson.set(e.id, json);
+        const known = session.sentEnts.get(e.id);
+        // the viewer's current target stays in interest to the widest drop
+        // radius so its unit frame doesn't vanish mid-chase
+        const limitSq = p.targetId === e.id
+          ? NPC_DROP_RADIUS * NPC_DROP_RADIUS
+          : interestLimitSq(e, known !== undefined);
+        if (d2 > limitSq) return;
+        present.add(e.id);
+        const cache = this.wireCacheFor(e);
+        if (known === undefined) {
+          // first sight carries the at-rest state exactly, so no settle
+          // record is owed until it moves again
+          ents.push(cache.fullJson);
+          session.sentEnts.set(e.id, { idVer: cache.idVer, dynVer: cache.dynVer, sentAtTick: tick, settled: true });
+          return;
         }
-        ents.push(json);
+        if (known.idVer !== cache.idVer) {
+          ents.push(cache.fullJson);
+          known.idVer = cache.idVer;
+          known.dynVer = cache.dynVer;
+          known.sentAtTick = tick;
+          known.settled = false;
+          return;
+        }
+        if (!isUpdateDue(tick, e, d2, p, known.sentAtTick) || (known.dynVer === cache.dynVer && known.settled)) {
+          // not due at this distance tier yet, or unchanged and already
+          // settled: a bare id keeps it alive on the client
+          keep.push(e.id);
+          return;
+        }
+        // due, and either changed or owing its one settle record
+        known.settled = known.dynVer === cache.dynVer;
+        known.dynVer = cache.dynVer;
+        known.sentAtTick = tick;
+        ents.push(cache.liteJson);
       });
-      this.sendRaw(session, `${head},"self":${this.selfWireJson(session, p, meta)},"ents":[${ents.join(',')}]}`);
+      // forget entities that left interest, so a re-entry sends identity again
+      for (const id of session.sentEnts.keys()) {
+        if (!present.has(id)) session.sentEnts.delete(id);
+      }
+      const keepJson = keep.length > 0 ? `,"keep":[${keep.join(',')}]` : '';
+      this.sendRaw(session, `${head},"self":${this.selfWireJson(session, p, meta)},"ents":[${ents.join(',')}]${keepJson}}`);
+    }
+    // >= rather than a modulo check: catch-up broadcasts can skip ticks
+    if (tick - this.lastWireSweepTick >= WIRE_CACHE_SWEEP_TICKS) {
+      this.lastWireSweepTick = tick;
+      this.sweepWireCache();
+    }
+  }
+
+  // each entity is serialized at most once per tick, shared by every
+  // recipient whose interest area contains it
+  private wireCacheFor(e: Entity): EntityWireCache {
+    let cache = this.wireCache.get(e.id);
+    if (!cache) {
+      cache = { tick: -1, idJson: '', dynJson: '', idVer: 0, dynVer: 0, fullJson: '', liteJson: '' };
+      this.wireCache.set(e.id, cache);
+    }
+    if (cache.tick === this.sim.tickCount) return cache;
+    cache.tick = this.sim.tickCount;
+    const idJson = JSON.stringify(identityFields(e));
+    const dynJson = JSON.stringify(dynamicFields(e));
+    let changed = false;
+    if (idJson !== cache.idJson) {
+      cache.idJson = idJson;
+      cache.idVer++;
+      changed = true;
+    }
+    if (dynJson !== cache.dynJson) {
+      cache.dynJson = dynJson;
+      cache.dynVer++;
+      changed = true;
+    }
+    if (changed) {
+      cache.fullJson = `{"id":${e.id},${idJson.slice(1, -1)},${dynJson.slice(1, -1)}}`;
+      cache.liteJson = `{"id":${e.id},${dynJson.slice(1, -1)}}`;
+    }
+    return cache;
+  }
+
+  private sweepWireCache(): void {
+    for (const id of this.wireCache.keys()) {
+      if (!this.sim.entities.has(id)) this.wireCache.delete(id);
     }
   }
 

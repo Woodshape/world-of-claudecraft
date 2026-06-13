@@ -34,6 +34,26 @@ function mergeSelf(prev, next) {
   return next;
 }
 
+// entity identity fields ride only in "full" records (first sight and
+// changes); "lite" records inherit them from the previous state. Ids in
+// snap.keep are alive but unchanged; anything absent from both is gone.
+const ENTITY_IDENTITY_KEYS = ['k', 'tid', 'nm', 'lv', 'sc', 'c', 'dgn'];
+function mergeEnts(prevEnts, snap) {
+  const next = new Map();
+  for (const w of snap.ents) {
+    const prev = prevEnts.get(w.id);
+    if (prev && w.k === undefined) {
+      for (const key of ENTITY_IDENTITY_KEYS) if (key in prev) w[key] = prev[key];
+    }
+    next.set(w.id, w);
+  }
+  for (const id of snap.keep ?? []) {
+    const prev = prevEnts.get(id);
+    if (prev) next.set(id, prev);
+  }
+  return next;
+}
+
 class Bot {
   constructor(name, cls) {
     this.name = name;
@@ -60,7 +80,8 @@ class Bot {
         if (msg.t === 'hello') { this.pid = msg.pid; clearTimeout(to); resolve(); }
         else if (msg.t === 'snap') {
           this.self = mergeSelf(this.self, msg.self);
-          this.ents = new Map([[this.self.id, this.self], ...msg.ents.map((e) => [e.id, e])]);
+          this.ents = mergeEnts(this.ents, msg);
+          this.ents.set(this.self.id, this.self);
         } else if (msg.t === 'events') this.events.push(...msg.list);
       });
       this.ws.on('error', reject);

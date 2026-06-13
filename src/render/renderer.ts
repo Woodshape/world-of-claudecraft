@@ -687,6 +687,7 @@ export class Renderer {
     sharedUniforms.uTime.value = this.time;
     const sim = this.sim;
     const p = sim.player;
+    const now = performance.now();
 
     // dynamic worlds: create views for newcomers, drop views for leavers
     // (doomed ids collected into a reused scratch array — no per-frame alloc)
@@ -737,11 +738,18 @@ export class Renderer {
           for (const caster of v.objectCasters) (caster as THREE.Mesh).castShadow = wantShadow;
         }
       }
-      const x = e.prevPos.x + (e.pos.x - e.prevPos.x) * alpha;
-      const y = e.prevPos.y + (e.pos.y - e.prevPos.y) * alpha;
-      const z = e.prevPos.z + (e.pos.z - e.prevPos.z) * alpha;
+      // online, entities beyond nameplate range stream below snapshot rate;
+      // each interpolates on its own clock so they move smoothly instead of
+      // freezing and dashing once per update (self keeps the global alpha
+      // the camera follow uses)
+      const ea = e.id !== p.id && e.netUpdatedAt !== undefined && e.netInterval !== undefined
+        ? Math.min(1.25, (now - e.netUpdatedAt) / Math.max(20, e.netInterval))
+        : alpha;
+      const x = e.prevPos.x + (e.pos.x - e.prevPos.x) * ea;
+      const y = e.prevPos.y + (e.pos.y - e.prevPos.y) * ea;
+      const z = e.prevPos.z + (e.pos.z - e.prevPos.z) * ea;
       v.group.position.set(x, y, z);
-      let facing = e.prevFacing + shortestAngle(e.prevFacing, e.facing) * alpha;
+      let facing = e.prevFacing + shortestAngle(e.prevFacing, e.facing) * ea;
       if (e.id === p.id && renderFacingOverride !== null) facing = renderFacingOverride;
       v.group.rotation.y = facing;
 
